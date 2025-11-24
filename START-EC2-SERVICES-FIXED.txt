@@ -1,0 +1,20 @@
+========================================
+EC2 STARTUP COMMANDS (FIXED)
+========================================
+
+Copy these commands into EC2 terminal:
+
+---COPY FROM HERE---
+
+cd /home/ec2-user
+nohup java -jar upload-service.jar > /tmp/upload.log 2>&1 &
+sleep 5
+nohup java -jar pdf-service.jar > /tmp/pdf.log 2>&1 &
+sleep 5
+nohup java -jar download-service.jar > /tmp/download.log 2>&1 &
+sleep 10
+ps aux | grep java
+echo "✓ Services started!"
+echo "Check logs with: tail -f /tmp/upload.log"
+
+---COPY UNTIL HERE---

@@ -1,0 +1,32 @@
+========================================
+EC2 STARTUP COMMANDS
+========================================
+
+** COPY ALL COMMANDS BELOW AND PASTE INTO EC2 **
+
+1. Go to: https://console.aws.amazon.com/ec2
+2. Select instance: i-023794c76da5b3c2e
+3. Click "Connect" → "EC2 Instance Connect" → "Connect"
+4. Paste these commands:
+
+---COPY FROM HERE---
+
+sudo yum install -y java-17-amazon-corretto wget
+cd /home/ec2-user
+wget "https://smartalbum-photos-bucket.s3.us-east-1.amazonaws.com/deploy/upload-service-1.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAXKPUZO4AG5D2M6MY%2F20251124%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251124T114419Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=911a9098666eb9bddb59a6078b067bce7dcb0a5e3ab5ea711b0fc0417f75acb2" -O upload-service.jar
+wget "https://smartalbum-photos-bucket.s3.us-east-1.amazonaws.com/deploy/pdf-service-1.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAXKPUZO4AG5D2M6MY%2F20251124%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251124T114439Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=301059ffa747dd5d6deff2b9ddb22f7b883813ef7cc3462bd85773a52da8d58a" -O pdf-service.jar
+wget "https://smartalbum-photos-bucket.s3.us-east-1.amazonaws.com/deploy/download-service-1.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAXKPUZO4AG5D2M6MY%2F20251124%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251124T114540Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ccc9a99746248449684096514d6575b2d63678a39c209bc6fa668b57e3293ee7" -O download-service.jar
+nohup java -jar upload-service.jar > upload.log 2>&1 &
+sleep 5
+nohup java -jar pdf-service.jar > pdf.log 2>&1 &
+sleep 5
+nohup java -jar download-service.jar > download.log 2>&1 &
+sleep 10
+ps aux | grep java
+echo "✓ Services started! Your app should work now."
+
+---COPY UNTIL HERE---
+
+After pasting, wait 30 seconds, then test your frontend:
+http://smartalbum-frontend-503561418496.s3-website-us-east-1.amazonaws.com
+
