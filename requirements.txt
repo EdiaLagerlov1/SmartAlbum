@@ -1,0 +1,20 @@
+# SmartAlbum - תלויות בסיסיות (Python 3.11+)
+# התקנה: python3 -m pip install -r requirements.txt
+
+# שרת / API
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9      # קליטת קבצים (F01 - העלאת JPEGs)
+pydantic==2.9.2
+
+# עיבוד תמונות (image-pipeline: F02 EXIF/thumbnails, F04 חדות/חשיפה/דמיון)
+Pillow==10.4.0
+imagehash==4.3.1             # perceptual hash לקיבוץ תמונות דומות (F04)
+numpy==1.26.4
+
+# ייצוא PDF (export-agent: F09) - רינדור HTML/CSS זהה ל-preview ב-UI
+weasyprint==62.3
+
+# טסטים (qa-agent)
+pytest==8.3.3
+httpx==0.27.2                # TestClient עבור FastAPI
