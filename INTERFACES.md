@@ -17,24 +17,37 @@
 | שכבה | בחירה | הערות |
 |---|---|---|
 | שפה/ריצה | Python 3.11+ | כל המודולים (image-pipeline, selection-engine, layout-engine, export-agent) הם Python packages באותו תהליך/ריפו. |
-| שרת API | FastAPI + uvicorn | `frontend-rtl` מדבר עם השרת דרך HTTP JSON. |
+| שרת API | **Flask + Werkzeug** (עודכן — ראה הערה מתחת לטבלה) | `frontend-rtl` מדבר עם השרת דרך HTTP JSON. |
 | DB | SQLite, קובץ יחיד `storage/smartalbum.db` | ניגשים אליו **רק** דרך `db.get_connection()`. אין DB נפרד למודול. stdlib `sqlite3`, לא ORM - הסכמה פשוטה מספיק. |
 | עיבוד תמונות | Pillow (EXIF, thumbnails, resize) + `imagehash` (perceptual hash לדמיון, F04) + Laplacian-variance/numpy לחדות | ראה `image-pipeline.md`. |
-| Frontend | HTML/CSS/JS סטטי, `dir="rtl"`, ללא build step כבוי (אין React/Vue חובה; אפשר Vanilla JS או Alpine.js קל) | מוגש ע"י FastAPI (`StaticFiles`) או שרת סטטי נפרד בפיתוח. |
+| Frontend | HTML/CSS/JS סטטי, `dir="rtl"`, ללא build step כבוי (אין React/Vue חובה; אפשר Vanilla JS או Alpine.js קל) | מוגש ע"י Flask (`static_folder`) או שרת סטטי נפרד בפיתוח. |
 | ייצוא PDF | WeasyPrint, מרנדר את **אותו HTML/CSS** שה-preview ב-UI מציג | כדי להבטיח "PDF זהה ל-preview" (F09) - ראה `export-agent.md`. |
-| טסטים | pytest (unit/integration), httpx.TestClient (API), Cypress (E2E/UI - `qa-agent`) | |
+| טסטים | pytest (unit/integration), Flask `test_client()` (API), Cypress (E2E/UI - `qa-agent`) | |
+
+> **הערה (architect, עדכון לאחר #1)**: הבחירה המקורית הייתה FastAPI+uvicorn+httpx.
+> בפועל, בסביבת הפיתוח/CI האוטומטית של הפרויקט הזה אין גישת רשת להתקנת
+> חבילות חדשות מ-PyPI (`pip install` ל-`fastapi`/`httpx` חסום ב-policy, לא
+> תקלה זמנית), בזמן ש-`Flask`, `Werkzeug`, `starlette` ו-`uvicorn` **כבר
+> מותקנים מראש**. לכן שכבת ה-API היחידה שאפשר לבנות ולהריץ-בפועל (כולל
+> להריץ טסטים אמיתיים, לא רק syntax check) כאן היא **Flask**, לא FastAPI.
+> Flask עונה על כל הדרישות (REST JSON, multipart upload, הגשת static/) ויש
+> לו `app.test_client()` מובנה שמחליף את httpx.TestClient. **כל סוכן אחר
+> שכותב endpoints (frontend-rtl ואילך) יכתוב Flask (`@app.route`,
+> `request.files`, `jsonify`), לא FastAPI.** אם סביבת ריצה אחרת (למשל
+> production רגיל עם גישת רשת) תרצה FastAPI בעתיד - זה requires עדכון נוסף
+> של המסמך הזה לפני שינוי קוד, כרגיל.
 
 ### הרצה
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python3 -c "import db; db.init_db()"   # יוצר storage/smartalbum.db מ-schema.sql
-uvicorn main:app --reload               # main.py יוקם ע"י סוכן שיבנה את שכבת ה-API
+python3 main.py                         # מריץ Flask dev server (main.py יוקם ע"י סוכן שיבנה את שכבת ה-API)
 ```
 
 ### כללי תקשורת בין מודולים
 - image-pipeline / selection-engine / layout-engine / export-agent הם **Python packages באותו תהליך** - תקשורת ביניהם היא **קריאת פונקציה ישירה** (import), לא HTTP בין-מודולי. ה-DB המשותף (SQLite) הוא "מקור האמת" בין שלבים, כך שכל שלב אפשר להריץ/לנסות-מחדש בנפרד (`processing_jobs`, F10).
-- `frontend-rtl` הוא הצרכן היחיד שמדבר **HTTP** עם צד השרת (REST JSON דרך FastAPI). חתימות ה-endpoints אינן מפורטות כאן שורה-שורה (זה תפקיד סוכן ה-API/frontend לממש), אבל הן חייבות לעטוף 1:1 את הפונקציות המתועדות בסעיף 4 - לא ללוגיקה נוספת ב-route handler.
+- `frontend-rtl` הוא הצרכן היחיד שמדבר **HTTP** עם צד השרת (REST JSON דרך Flask). חתימות ה-endpoints אינן מפורטות כאן שורה-שורה (זה תפקיד סוכן ה-API/frontend לממש), אבל הן חייבות לעטוף 1:1 את הפונקציות המתועדות בסעיף 4 - לא ללוגיקה נוספת ב-route handler.
 - כל הטיפוסים בסעיף 4 הם **JSON-serializable** (dict / dataclass עם `.to_dict()` / `TypedDict`) כדי שאפשר יהיה להחזיר אותם גם כ-HTTP response בלי שכבת תרגום.
 
 ---
