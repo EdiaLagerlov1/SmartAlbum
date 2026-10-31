@@ -5,13 +5,22 @@ SmartAlbum - image-pipeline: F02 (תיקון כיוון EXIF + thumbnails) ו-F0
 ממשק מחייב מוגדר ב-INTERFACES.md סעיף 4.1 - אין להמציא חתימות אחרות.
 
 הסטאטוס הנוכחי של המודול הזה (ראה README למעלה בכל פונקציה):
-  - process_upload: F02 מלא (issue #3). חלקי F04 (sharpness_score/
-    exposure_score) **לא** ממומשים כאן בכוונה - משאירים NULL ומחכים ל-issue #5.
-  - group_similar_photos: stub בלבד, ממתין ל-issue #5 (F04) - לא כולל
-    לוגיקה מזויפת, רק raise NotImplementedError מתועד.
+  - process_upload: F02 מלא (issue #3) + F04 - sharpness_score/exposure_score
+    מחושבים כאן על ה-thumbnail המכוון (issue #5).
+  - group_similar_photos: ממומש (issue #5) - perceptual hash עצמאי
+    (Pillow+numpy, ראה _compute_phash) + union-find על Hamming distance.
 
 אחריות המודול: originals (ללא שינוי בייט), thumbnails, exif_orientation,
 sharpness/exposure/similarity (F04, issue #5). לא נוגע ב-spreads/selection.
+
+**אין אימון מודל ואין זיהוי פנים/זהות במודול הזה** - בכוונה, מחוץ לסקופ
+גרסת הבסיס (ראה image-pipeline.md).
+
+הערת סביבה (כמו ב-INTERFACES.md סעיף 1 לגבי FastAPI): בסביבת הפיתוח/CI
+הנוכחית אין גישת רשת להתקנת PyPI, אז `imagehash` (רשום ב-requirements.txt
+כתיעוד-כוונה) **לא מותקן בפועל** ולא ניתן להתקינו. לכן קיבוץ התמונות
+הדומות ממומש כאן עצמאית עם Pillow+numpy בלבד (dHash/average-hash ידני) -
+ראה `_compute_phash` למטה. `cv2`/`numpy` כן מותקנים ומשמשים לחדות/חשיפה.
 """
 
 from __future__ import annotations
@@ -25,7 +34,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover - cv2 אמור להיות מותקן בסביבה הזו
+    cv2 = None
 
 import storage
 
@@ -49,6 +64,127 @@ _FORMAT_TO_EXT = {
     "HEIF": ".heic",
 }
 _KNOWN_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"}
+
+# --- F04: פרמטרים לחדות/חשיפה/דמיון (issue #5) -----------------------------
+#
+# פיקסלים "קליפ" (over/under-exposed) - קרוב ל-0 או ל-255 (לא בדיוק 0/255,
+# כדי לסבול קצת רעש JPEG), לצורך ציון החשיפה.
+_EXPOSURE_CLIP_LOW = 2
+_EXPOSURE_CLIP_HIGH = 253
+
+# גודל ה-perceptual hash (dHash): מקטינים ל-(HASH_SIZE+1) x HASH_SIZE
+# פיקסלים לפני ההשוואה, כך שמתקבלים HASH_SIZE * HASH_SIZE ביטים (64 ל-8x8).
+_PHASH_SIZE = 8
+
+# סף Hamming distance (מתוך 64 ביט) שתחתיו שתי תמונות נחשבות "דומות" ומקובצות
+# לאותו similarity_group_id. 64 ביט * ~8% ≈ 5 - נבחר אמפירית כסף "near-duplicate"
+# (תמונות מאותה פריים/בורסט, לא רק "אותו נושא כללי"). ערך סביר לפי המקור
+# הסטנדרטי ל-dHash/aHash (ראה ספריית imagehash - לא זמינה כאן, ממומש עצמאית).
+_SIMILARITY_HAMMING_THRESHOLD = 5
+
+
+def _compute_sharpness_score(gray: np.ndarray) -> float:
+    """F04: ציון חדות = variance of Laplacian על גרייסקייל של ה-thumbnail
+    (אחרי תיקון כיוון EXIF ואחרי ה-resize הקבוע ל-_THUMBNAIL_MAX_SIDE, כך
+    שההשוואה בין תמונות "הוגנת" - לא מוטה ע"י רזולוציית מקור שונה).
+
+    קנה מידה: **לא מנורמל** ל-0..1 - זה raw variance, טווח טיפוסי כ-0 (עמום
+    לחלוטין) עד כמה אלפים (חד מאוד, הרבה קצוות/טקסטורה). שימוש מיועד: השוואה
+    *יחסית* בין תמונות באותו פרויקט (F04 - המלצה בלבד, לא סף מוחלט/absolute
+    cutoff, ולעולם לא עילה למחיקה אוטומטית).
+    """
+    if cv2 is not None:
+        return float(cv2.Laplacian(gray.astype(np.float64), cv2.CV_64F).var())
+    # fallback ללא cv2 (לא צפוי בסביבה הזו, אבל שלא נקרוס אם cv2 חסר):
+    # קרנל Laplacian 3x3 ידני via numpy.
+    kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float64)
+    padded = np.pad(gray.astype(np.float64), 1, mode="edge")
+    lap = (
+        kernel[0, 1] * padded[0:-2, 1:-1]
+        + kernel[1, 0] * padded[1:-1, 0:-2]
+        + kernel[1, 1] * padded[1:-1, 1:-1]
+        + kernel[1, 2] * padded[1:-1, 2:]
+        + kernel[2, 1] * padded[2:, 1:-1]
+    )
+    return float(lap.var())
+
+
+def _compute_exposure_score(gray: np.ndarray) -> float:
+    """F04: ציון חשיפה בטווח 0..1 (1 = חשיפה מאוזנת, קרוב ל-0 = חשוכה/שרופה
+    מאוד). מבוסס על שני מרכיבים, שניהם 0..1 (worst=1):
+      1. מרחק הבהירות הממוצעת (ממוצע הפיקסלים 0..255) מהאמצע (128).
+      2. שיעור הפיקסלים ה"קליפ" - קרוב ל-0 או ל-255 (חשיפה-תחת/יתר ברור).
+    score = 1 - mean_term - clipped_fraction, חתוך ל-[0, 1].
+    """
+    mean = float(gray.mean())
+    mean_term = abs(mean / 255.0 - 0.5) * 2.0  # 0 (ממוצע=128) עד 1 (0 או 255)
+    total = gray.size
+    if total == 0:
+        return 0.0
+    clipped = float(
+        np.count_nonzero((gray <= _EXPOSURE_CLIP_LOW) | (gray >= _EXPOSURE_CLIP_HIGH))
+    ) / total
+    score = 1.0 - mean_term - clipped
+    return max(0.0, min(1.0, score))
+
+
+def _compute_phash(image_path: str | os.PathLike) -> int | None:
+    """F04: perceptual hash עצמאי (dHash) - Pillow+numpy בלבד, בלי תלות
+    ב-`imagehash` (לא ניתן להתקנה בסביבה הזו - ראה docstring המודול).
+
+    אלגוריתם dHash סטנדרטי: מקטינים את התמונה ל-(_PHASH_SIZE+1) x _PHASH_SIZE
+    פיקסלים בגרייסקייל, ולכל שורה משווים כל פיקסל לשכן שלו מימין
+    (gradient horizontal) -> ביט 1 אם הפיקסל השמאלי בהיר יותר. התוצאה:
+    _PHASH_SIZE * _PHASH_SIZE ביטים (64 עבור 8x8), ארוזים ל-int יחיד.
+
+    עמיד יחסית לשינויי קנה-מידה/קומפרסיה קלים (בניגוד ל-hash קריפטוגרפי),
+    כך ששתי תמונות "כמעט-זהות" (בורסט/duplicate) יקבלו hash קרוב מאוד
+    (Hamming distance נמוך) גם אם אינן בייט-לבייט זהות.
+
+    מחזיר None אם הקובץ לא נפתח/פגום (לא אמור לקרות - group_similar_photos
+    קורא רק על photos.thumb_path שכבר עבר עיבוד מוצלח ב-process_upload, אבל
+    זה הגנה נוספת כדי שתמונה בודדת לא תפיל את כל הקיבוץ של הפרויקט).
+    """
+    try:
+        with Image.open(image_path) as img:
+            small = img.convert("L").resize(
+                (_PHASH_SIZE + 1, _PHASH_SIZE), Image.Resampling.LANCZOS
+            )
+            arr = np.asarray(small, dtype=np.int16)
+    except (UnidentifiedImageError, FileNotFoundError, OSError, ValueError):
+        return None
+
+    diff_bits = arr[:, :-1] > arr[:, 1:]
+    h = 0
+    for bit in diff_bits.flatten():
+        h = (h << 1) | int(bit)
+    return h
+
+
+def _hamming_distance(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+
+class _UnionFind:
+    """union-find מינימלי לקיבוץ photo_id-ים לרכיבי-קשירות לפי Hamming
+    distance (F04) - כך ששרשרת של תמונות דומות-זו-לזו (A~B, B~C) מקובצת
+    יחד גם אם A ו-C עצמן לא קרובות ישירות (burst תמונות)."""
+
+    def __init__(self, items):
+        self._parent = {item: item for item in items}
+
+    def find(self, x):
+        root = x
+        while self._parent[root] != root:
+            root = self._parent[root]
+        while self._parent[x] != root:
+            self._parent[x], x = root, self._parent[x]
+        return root
+
+    def union(self, a, b) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[ra] = rb
 
 
 @dataclass
@@ -108,11 +244,15 @@ def process_upload(
     original_filename: str,
     db: sqlite3.Connection,
 ) -> PhotoUploadResult:
-    """F01/F02: יוצר שורת photos, מעביר את הקובץ ל-storage.original_path
-    (ללא שינוי בייט), מתקן כיוון ויוצר thumbnail.
+    """F01/F02/F04: יוצר שורת photos, מעביר את הקובץ ל-storage.original_path
+    (ללא שינוי בייט), מתקן כיוון ויוצר thumbnail, ומחשב sharpness_score/
+    exposure_score (על ה-thumbnail המכוון - ראה _compute_sharpness_score/
+    _compute_exposure_score). שניהם המלצה בלבד - תמונה לעולם לא נמחקת/נפסלת
+    כאן בגלל ציון נמוך (F04).
 
-    F04 (sharpness_score/exposure_score/similarity_group_id) - **לא** מחושב
-    כאן בכוונה; נשאר NULL עד issue #5 (ראה group_similar_photos למטה).
+    similarity_group_id **לא** מחושב כאן - זה תפקיד group_similar_photos
+    (נקרא בנפרד per project, ראה למטה), כי דמיון הוא יחס בין-תמונות ולא
+    תכונה per-photo יחידה.
 
     כשל בקובץ בודד לא מעלה exception שעוצר קבצים אחרים - נלכד פנימית
     ומוחזר PhotoUploadResult(status="failed").
@@ -153,6 +293,16 @@ def process_upload(
             thumb_buffer = io.BytesIO()
             oriented.save(thumb_buffer, format="JPEG", quality=_THUMBNAIL_JPEG_QUALITY)
             thumb_bytes = thumb_buffer.getvalue()
+
+            # F04: חדות/חשיפה מחושבים על אותו oriented/resized thumbnail
+            # שכבר הופק (אותו תיקון כיוון + resize ל-_THUMBNAIL_MAX_SIDE) -
+            # כדי שההשוואה בין תמונות תהיה הוגנת ולא תלויה ברזולוציית מקור.
+            gray_arr = np.asarray(
+                oriented if oriented.mode == "L" else oriented.convert("L"),
+                dtype=np.uint8,
+            )
+            sharpness_score = _compute_sharpness_score(gray_arr)
+            exposure_score = _compute_exposure_score(gray_arr)
     except (UnidentifiedImageError, FileNotFoundError, OSError, ValueError) as exc:
         reason = f"קובץ תמונה פגום או לא נתמך: {exc}"
         _set_job_status(db, project_id, "exif", "failed", reason)
@@ -177,9 +327,10 @@ def process_upload(
         """
         INSERT INTO photos (
             id, project_id, original_filename, original_path, file_size_bytes,
-            uploaded_at, thumb_path, exif_orientation, width, height, error_reason
+            uploaded_at, thumb_path, exif_orientation, width, height,
+            sharpness_score, exposure_score, error_reason
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
         ON CONFLICT(id) DO UPDATE SET
             original_filename = excluded.original_filename,
             original_path = excluded.original_path,
@@ -188,6 +339,8 @@ def process_upload(
             exif_orientation = excluded.exif_orientation,
             width = excluded.width,
             height = excluded.height,
+            sharpness_score = excluded.sharpness_score,
+            exposure_score = excluded.exposure_score,
             error_reason = NULL
         """,
         (
@@ -201,6 +354,8 @@ def process_upload(
             exif_orientation,
             thumb_width,
             thumb_height,
+            sharpness_score,
+            exposure_score,
         ),
     )
     db.commit()
@@ -212,15 +367,58 @@ def process_upload(
 
 
 def group_similar_photos(project_id: str, db: sqlite3.Connection) -> None:
-    """F04: מחשב similarity_group_id (perceptual hash, imagehash) וכותב
-    ל-photos. לא מוחק/פוסל תמונות - selection-engine מחליט על סמך זה (F06).
+    """F04: מחשב similarity_group_id (perceptual hash עצמאי, dHash - ראה
+    _compute_phash) וכותב ל-photos. לא מוחק/פוסל תמונות - selection-engine
+    מחליט על סמך זה (F06, F03 - exclude/must תמיד שולטים).
 
-    TODO(issue #5): עדיין לא ממומש - ה-issue הנוכחי (#3) מכסה רק F02
-    (EXIF orientation + thumbnails). בכוונה לא נכתבה כאן לוגיקה חלקית/מזויפת
-    (למשל "קיבוץ" שרירותי) - כך ש-selection-engine לא יקבל similarity_group_id
-    שגוי. selection-engine צריך להתייחס ל-similarity_group_id=NULL כ"לא חושב
-    עדיין", לא כ"אין תמונות דומות".
+    נקרא **per project** (לא per-photo) - בדרך כלל אחרי שכל ה-process_upload
+    של הפרויקט הסתיימו, כדי לקבץ תמונות "דומות" (למשל בורסט) לאותו
+    similarity_group_id. אלגוריתם: perceptual hash per photo (על
+    thumb_path - כבר oriented+resized), ואז union-find על זוגות עם
+    Hamming distance <= _SIMILARITY_HAMMING_THRESHOLD (קיבוץ טרנזיטיבי:
+    A~B וגם B~C -> A,B,C קבוצה אחת גם אם A,C לא קרובות ישירות).
+
+    מורכבות: O(n^2) זוגות hash להשוואה בתוך הפרויקט - מתאים לכמות תמונות
+    טיפוסית לאלבום חתונה (עשרות-אלפי יחידות), לא ל-dataset עצום.
+
+    תמונות ללא thumb_path תקין (לא עברו process_upload בהצלחה) מדולגות -
+    similarity_group_id שלהן נשאר NULL. תמונה בודדת (ללא שום תמונה דומה
+    בפרויקט) מקבלת similarity_group_id ייחודי משלה (קבוצה בגודל 1) - כך
+    ש-NULL אחרי הרצה מוצלחת של group_similar_photos מסמן אך ורק "עדיין לא
+    חושב" (למשל תמונה שנכשלה ב-process_upload), לא "אין לה תמונות דומות".
     """
-    raise NotImplementedError(
-        "group_similar_photos (F04) ממתין ל-issue #5 - לא ממומש ב-issue #3."
-    )
+    _set_job_status(db, project_id, "grouping", "running")
+    try:
+        rows = db.execute(
+            "SELECT id, thumb_path FROM photos WHERE project_id = ? AND thumb_path IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+
+        hashes: dict[str, int] = {}
+        for row in rows:
+            h = _compute_phash(row["thumb_path"])
+            if h is not None:
+                hashes[row["id"]] = h
+
+        photo_ids = list(hashes.keys())
+        uf = _UnionFind(photo_ids)
+        for i in range(len(photo_ids)):
+            for j in range(i + 1, len(photo_ids)):
+                a, b = photo_ids[i], photo_ids[j]
+                if _hamming_distance(hashes[a], hashes[b]) <= _SIMILARITY_HAMMING_THRESHOLD:
+                    uf.union(a, b)
+
+        root_to_group_id: dict[str, str] = {}
+        for photo_id in photo_ids:
+            root = uf.find(photo_id)
+            group_id = root_to_group_id.setdefault(root, str(uuid.uuid4()))
+            db.execute(
+                "UPDATE photos SET similarity_group_id = ? WHERE id = ?",
+                (group_id, photo_id),
+            )
+        db.commit()
+    except Exception as exc:
+        _set_job_status(db, project_id, "grouping", "failed", f"כשל בקיבוץ תמונות דומות: {exc}")
+        raise
+
+    _set_job_status(db, project_id, "grouping", "done")

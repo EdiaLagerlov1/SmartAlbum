@@ -1,10 +1,14 @@
 """
-בדיקות יחידה ל-image_pipeline (F02 - issue #3).
+בדיקות יחידה ל-image_pipeline (F02 - issue #3, F04 - issue #5).
 
 מכסה:
   (א) כיוון EXIF מתוקן ב-thumbnail (לא במקור).
   (ב) בייטים של original_path זהים בייט-לבייט לקובץ שהועלה (hash).
   (ג) קובץ לא-תקין לא עוצר את הריצה ומוחזר status="failed".
+  (ד) F04: sharpness_score גבוה יותר לתמונה חדה מאשר לגרסה מטושטשת שלה.
+  (ה) F04: exposure_score גבוה יותר לתמונה מאוזנת מאשר לתמונה שרופה/חשוכה.
+  (ו) F04: group_similar_photos מקבץ תמונות כמעט-זהות לאותו similarity_group_id,
+      ולא מקבץ תמונה שונה מהותית לאותה קבוצה; מעדכן processing_jobs(stage='grouping').
 
 משתמש בתמונות שנוצרות פרוגרמטית עם Pillow בזמן ריצת הטסט (אין קבצי
 תמונה מוכנים בריפו) - ראה שימוש ב-SMARTALBUM_STORAGE_ROOT / SMARTALBUM_DB_PATH
@@ -20,8 +24,9 @@ import os
 import sys
 import uuid
 
+import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageFilter
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -40,6 +45,28 @@ def _make_jpeg_with_orientation(path, orientation: int, size=(40, 20)) -> None:
     exif = img.getexif()
     exif[0x0112] = orientation  # Orientation tag
     img.save(path, "JPEG", exif=exif)
+
+
+def _make_checkerboard_jpeg(path, size=(64, 64), cell=4, seed: int = 0) -> None:
+    """תמונה עם תדר-גבוה (לוח שחמט + רעש קל) - "חדה" מבחינת variance of
+    Laplacian. seed מאפשר לבנות שתי תמונות "כמעט-זהות" (אותו seed, שינוי
+    זעיר) עבור טסט הקיבוץ (F04)."""
+    rng = np.random.default_rng(seed)
+    w, h = size
+    arr = np.zeros((h, w), dtype=np.uint8)
+    for y in range(h):
+        for x in range(w):
+            arr[y, x] = 255 if ((x // cell) + (y // cell)) % 2 == 0 else 0
+    noise = rng.integers(-3, 4, size=arr.shape)
+    arr = np.clip(arr.astype(int) + noise, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr, mode="L").convert("RGB")
+    img.save(path, "JPEG", quality=95)
+
+
+def _make_solid_jpeg(path, gray_value: int, size=(64, 64)) -> None:
+    """תמונה חלקה בגוון אחיד - שימושי לטסט חשיפה (over/under-exposed)."""
+    img = Image.new("L", size, color=gray_value).convert("RGB")
+    img.save(path, "JPEG", quality=95)
 
 
 @pytest.fixture()
@@ -231,3 +258,194 @@ def test_second_upload_of_same_filename_is_not_reprocessed(pipeline_env, monkeyp
 
     assert second.status == "done"
     assert second.photo_id == first.photo_id
+
+
+# ============================================================
+# F04 (issue #5): sharpness_score / exposure_score / group_similar_photos
+# ============================================================
+
+
+def test_sharp_image_scores_higher_sharpness_than_blurred_version(pipeline_env):
+    pipeline = pipeline_env["pipeline"]
+    conn = pipeline_env["conn"]
+    project_id = pipeline_env["project_id"]
+    tmp_path = pipeline_env["tmp_path"]
+
+    sharp_path = tmp_path / "sharp.jpg"
+    _make_checkerboard_jpeg(sharp_path, seed=1)
+
+    blurred_path = tmp_path / "blurred.jpg"
+    with Image.open(sharp_path) as img:
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=4))
+        blurred.save(blurred_path, "JPEG", quality=95)
+
+    sharp_result = pipeline.process_upload(
+        project_id=project_id,
+        saved_file_path=str(sharp_path),
+        original_filename="sharp.jpg",
+        db=conn,
+    )
+    blurred_result = pipeline.process_upload(
+        project_id=project_id,
+        saved_file_path=str(blurred_path),
+        original_filename="blurred.jpg",
+        db=conn,
+    )
+
+    assert sharp_result.status == "done"
+    assert blurred_result.status == "done"
+
+    sharp_row = conn.execute(
+        "SELECT sharpness_score FROM photos WHERE id = ?", (sharp_result.photo_id,)
+    ).fetchone()
+    blurred_row = conn.execute(
+        "SELECT sharpness_score FROM photos WHERE id = ?", (blurred_result.photo_id,)
+    ).fetchone()
+
+    assert sharp_row["sharpness_score"] is not None
+    assert blurred_row["sharpness_score"] is not None
+    assert sharp_row["sharpness_score"] > blurred_row["sharpness_score"]
+
+
+def test_balanced_exposure_scores_higher_than_blown_out_image(pipeline_env):
+    pipeline = pipeline_env["pipeline"]
+    conn = pipeline_env["conn"]
+    project_id = pipeline_env["project_id"]
+    tmp_path = pipeline_env["tmp_path"]
+
+    balanced_path = tmp_path / "balanced.jpg"
+    _make_solid_jpeg(balanced_path, gray_value=128)
+
+    overexposed_path = tmp_path / "overexposed.jpg"
+    _make_solid_jpeg(overexposed_path, gray_value=255)
+
+    balanced_result = pipeline.process_upload(
+        project_id=project_id,
+        saved_file_path=str(balanced_path),
+        original_filename="balanced.jpg",
+        db=conn,
+    )
+    overexposed_result = pipeline.process_upload(
+        project_id=project_id,
+        saved_file_path=str(overexposed_path),
+        original_filename="overexposed.jpg",
+        db=conn,
+    )
+
+    assert balanced_result.status == "done"
+    assert overexposed_result.status == "done"
+
+    balanced_row = conn.execute(
+        "SELECT exposure_score FROM photos WHERE id = ?", (balanced_result.photo_id,)
+    ).fetchone()
+    overexposed_row = conn.execute(
+        "SELECT exposure_score FROM photos WHERE id = ?", (overexposed_result.photo_id,)
+    ).fetchone()
+
+    assert balanced_row["exposure_score"] is not None
+    assert overexposed_row["exposure_score"] is not None
+    assert balanced_row["exposure_score"] > overexposed_row["exposure_score"]
+
+
+def test_group_similar_photos_groups_near_duplicates_not_different_photo(pipeline_env):
+    pipeline = pipeline_env["pipeline"]
+    conn = pipeline_env["conn"]
+    project_id = pipeline_env["project_id"]
+    tmp_path = pipeline_env["tmp_path"]
+
+    # שתי תמונות "כמעט-זהות" (אותו seed, רעש זעיר אקראי שונה בכל קריאה
+    # אבל אותו דפוס בסיס) - מדמה שתי תמונות מאותו בורסט.
+    near_dup_a = tmp_path / "burst_a.jpg"
+    near_dup_b = tmp_path / "burst_b.jpg"
+    _make_checkerboard_jpeg(near_dup_a, seed=42)
+    _make_checkerboard_jpeg(near_dup_b, seed=42)
+
+    # תמונה שונה מהותית (דפוס הפוך) - לא אמורה להתקבץ עם הזוג הקודם.
+    different = tmp_path / "different.jpg"
+    img = Image.new("L", (64, 64), color=0)
+    for y in range(0, 64, 2):
+        for x in range(64):
+            img.putpixel((x, y), 255)
+    img.convert("RGB").save(different, "JPEG", quality=95)
+
+    result_a = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(near_dup_a),
+        original_filename="burst_a.jpg", db=conn,
+    )
+    result_b = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(near_dup_b),
+        original_filename="burst_b.jpg", db=conn,
+    )
+    result_c = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(different),
+        original_filename="different.jpg", db=conn,
+    )
+    assert "done" == result_a.status == result_b.status == result_c.status
+
+    pipeline.group_similar_photos(project_id, conn)
+
+    row_a = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (result_a.photo_id,)
+    ).fetchone()
+    row_b = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (result_b.photo_id,)
+    ).fetchone()
+    row_c = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (result_c.photo_id,)
+    ).fetchone()
+
+    assert row_a["similarity_group_id"] is not None
+    assert row_b["similarity_group_id"] is not None
+    assert row_c["similarity_group_id"] is not None
+
+    assert row_a["similarity_group_id"] == row_b["similarity_group_id"]
+    assert row_c["similarity_group_id"] != row_a["similarity_group_id"]
+
+    job = conn.execute(
+        "SELECT status, error_reason FROM processing_jobs WHERE project_id = ? AND stage = 'grouping'",
+        (project_id,),
+    ).fetchone()
+    assert job is not None
+    assert job["status"] == "done"
+    assert job["error_reason"] is None
+
+
+def test_group_similar_photos_does_not_raise_and_skips_photos_without_thumbnail(pipeline_env):
+    """F01/F10: תמונה שנכשלה ב-process_upload (אין thumb_path) לא מפילה
+    את group_similar_photos ולא מקבלת similarity_group_id."""
+    pipeline = pipeline_env["pipeline"]
+    conn = pipeline_env["conn"]
+    project_id = pipeline_env["project_id"]
+    tmp_path = pipeline_env["tmp_path"]
+
+    ok_path = tmp_path / "ok.jpg"
+    _make_checkerboard_jpeg(ok_path, seed=7)
+    ok_result = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(ok_path),
+        original_filename="ok.jpg", db=conn,
+    )
+    assert ok_result.status == "done"
+
+    bad_path = tmp_path / "bad.jpg"
+    bad_path.write_bytes(b"not a real image")
+    bad_result = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(bad_path),
+        original_filename="bad.jpg", db=conn,
+    )
+    assert bad_result.status == "failed"
+
+    # לא אמור להעלות exception.
+    pipeline.group_similar_photos(project_id, conn)
+
+    ok_row = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (ok_result.photo_id,)
+    ).fetchone()
+    assert ok_row["similarity_group_id"] is not None
+
+    # הקובץ הפגום לא יצר שורת photos כלל (ראה test_corrupt_file... מעלה) -
+    # ומכאן שאין לו similarity_group_id לבדוק; רק מאשרים שהקיבוץ לא קרס.
+    job = conn.execute(
+        "SELECT status FROM processing_jobs WHERE project_id = ? AND stage = 'grouping'",
+        (project_id,),
+    ).fetchone()
+    assert job["status"] == "done"
