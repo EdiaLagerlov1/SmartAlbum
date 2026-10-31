@@ -59,7 +59,46 @@
       <div id="photos-grid" class="photos-grid"></div>
     </section>
 
+    <!-- F10: מצב עיבוד per-stage, ניסיון חוזר, ומחיקת פרויקט -->
+    <section class="card" id="status-section" hidden>
+      <h2>מצב עיבוד</h2>
+      <div class="row">
+        <button id="refresh-status-btn" class="btn btn-secondary">רענון סטטוס</button>
+        <button id="retry-btn" class="btn btn-primary" hidden>ניסיון חוזר</button>
+      </div>
+
+      <ul id="stages-list" class="stages-list" aria-live="polite"></ul>
+
+      <p id="photos-failed-summary" class="muted" hidden></p>
+      <p id="retry-result" class="muted" hidden aria-live="polite"></p>
+
+      <hr class="section-divider" />
+
+      <div class="row">
+        <button id="delete-project-btn" class="btn btn-danger">מחיקת פרויקט</button>
+      </div>
+      <p class="muted">מחיקת פרויקט היא פעולה בלתי-הפיכה - היא מוחקת גם את כל התמונות, הכפולות והתוצרים שנוצרו עבורו.</p>
+    </section>
+
   </main>
+
+  <!-- F10: modal אישור מחיקה מפורש (type-to-confirm) -->
+  <div id="delete-modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+      <h3 id="delete-modal-title">מחיקת פרויקט לצמיתות</h3>
+      <p>
+        פעולה זו תמחק את הפרויקט <strong id="delete-modal-project-name"></strong> לצמיתות,
+        כולל כל התמונות, הכפולות והתוצרים שנוצרו עבורו. <strong>לא ניתן לשחזר.</strong>
+      </p>
+      <label for="delete-confirm-input">להמשך, הקלידו את המילה <code>מחיקה</code> בתיבה למטה:</label>
+      <input type="text" id="delete-confirm-input" autocomplete="off" />
+      <p id="delete-modal-error" class="error-text" hidden></p>
+      <div class="row">
+        <button id="delete-confirm-btn" class="btn btn-danger" disabled>מחיקה לצמיתות</button>
+        <button id="delete-cancel-btn" class="btn btn-secondary">ביטול</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

@@ -249,6 +249,109 @@ input[type="text"] {
   white-space: nowrap;
 }
 
+.btn-danger {
+  background: #fdeceb;
+  color: #b42318;
+}
+
+.btn-danger:hover {
+  background: #fbdad7;
+}
+
+.section-divider {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 1.1rem 0;
+}
+
+/* F10: רשימת שלבי עיבוד (processing_jobs) - כרטיס לכל שלב, עם badge סטטוס
+   (משתמש שוב ב-.status-badge הקיים, לא מוסיף variant חדש של צבעים). כיוון
+   הטקסט/הסדר נשאר תחת dir="rtl" הגלובלי - אין סדר/חיצים שצריך להפוך. */
+.stages-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.stage-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.stage-item .stage-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.stage-item .stage-error {
+  flex-basis: 100%;
+  font-size: 0.82rem;
+  color: #b42318;
+}
+
+.status-badge.not_started {
+  background: #eef0f4;
+  color: #6b7280;
+}
+
+.status-badge.running {
+  background: #fff4de;
+  color: #92650c;
+}
+
+/* F10: modal אישור מחיקה - type-to-confirm, overlay ממרכז את תוכן ה-modal. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 30, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+}
+
+.modal-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 1.5rem;
+  max-width: 420px;
+  width: 100%;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.modal-box h3 {
+  margin-top: 0;
+}
+
+.modal-box code {
+  direction: ltr;
+  unicode-bidi: embed;
+  background: #f1f3fb;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.modal-box input[type="text"] {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.modal-box .row {
+  justify-content: flex-end;
+}
+
 [hidden] {
   display: none !important;
 }
