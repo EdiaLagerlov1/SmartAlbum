@@ -121,6 +121,16 @@ def group_similar_photos(project_id: str, db: sqlite3.Connection) -> None:
     """
 ```
 
+> **הערה (image-pipeline, implementation note - issue #5)**: בדיוק כמו הערת
+> ה-architect מעל על FastAPI/httpx (סעיף 1) - בסביבת הפיתוח/CI הנוכחית
+> PyPI חסום ו-`imagehash` (רשום ב-`requirements.txt`) **לא מותקן בפועל**.
+> `group_similar_photos` מנסה `import imagehash` ברכה (best-effort); אם
+> זה נכשל, נופל בחזרה למימוש "average hash" עצמאי עם Pillow+numpy בלבד
+> (הקטנה ל-8x8 grayscale, השוואה לממוצע -> 64 ביט, Hamming distance),
+> מתועד ב-`image_pipeline/api.py` (`_compute_photo_hash`/`_AverageHash`).
+> TODO: אם `imagehash` יותקן בעתיד (סביבה עם גישת רשת) - אפשר/רצוי להסיר
+> את ה-fallback ולהשתמש תמיד ב-`imagehash.phash` (מדויק יותר).
+
 **קונטרקט מול selection-engine**: אחרי `process_upload` + `group_similar_photos`, כל שורת `photos` רלוונטית מכילה `thumb_path`, `width/height`, `taken_at`, `sharpness_score`, `exposure_score`, `similarity_group_id` תקינים (או NULL אם לא ניתן לחשב).
 
 ### 4.2 selection-engine → (DB) → layout-engine
