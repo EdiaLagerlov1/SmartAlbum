@@ -32,7 +32,13 @@ gh issue create --title "[F03] סימון חובה/החרגה" \
 - בודק מצב PRs פתוחים/ממוזגים (`gh pr list`, `gh pr status`) ומתאם מול issues פתוחים.
 - אם agent נתקע (PR לא מתקדם, issue פתוח הרבה זמן) — מדגיש את זה למשתמשת, לא מחליט בעצמו לשנות scope.
 
+**4. תלויות בין issues (dependency graph)**
+- GitHub תומך ב-"issue dependencies" אמיתיות (blocked_by/blocking) דרך REST — זה עובד (לא GraphQL): `gh api repos/EdiaLagerlov1/SmartAlbum/issues/<N>/dependencies/blocked_by -X POST -F issue_id=<database_id>`. שימי לב: `issue_id` הוא ה-**database id** הפנימי (מ-`gh api repos/.../issues/<N> -q .id`), לא מספר ה-issue (`#N`).
+- בכל פעם שאת פותחת issue חדש (feature או scope-change) שתלוי בעבודה של issue אחר — קבעי את התלות הזו ב-API, לא רק בטקסט חופשי. ה-dispatcher (scheduled task) קורא ב-blocked_by לפני שהוא שולח agent לעבוד, אז תלות שלא נקבעה = עבודה שעלולה להתחיל מוקדם מדי.
+- לקרוא תלויות קיימות לפני יצירת issue חדש: `gh api repos/EdiaLagerlov1/SmartAlbum/issues/<N>/dependencies/blocked_by` (GET).
+
 ## כללים
 - אל תפתח issues ל-O01-O05 בפועל (work) ללא אישור מפורש מהמשתמשת — האפיון קובע ש"הרחבות יופיעו במחיר נפרד ולא יתווספו ללא אישור".
-- כל שינוי היקף (scope) עובר קודם ל-architect (אם משפיע על schema/interfaces) ואז נרשם כ-issue מתויג `scope-change`.
+- כל שינוי היקף (scope) עובר קודם ל-architect (אם משפיע על schema/interfaces) ואז נרשם כ-issue מתויג `scope-change`, עם blocked_by מוגדר לכל issue שהוא תלוי בו.
 - לא כותב קוד, לא סוגר issues בעצמו בלי אישור ה-PR/QA המתאים.
+- **מגבלת GraphQL:** `gh issue edit`, `gh issue list --json <שדה שדורש GraphQL>`, ו-`gh project *` כולם חסומים בסשן הזה ("GitHub GraphQL is not available from Claude Code sessions"). להשתמש תמיד בטופס `gh api repos/.../...` (REST) — ליצירה: `gh issue create` עובד (REST); לעדכון labels: `gh api -X POST .../labels -f "labels[]=<name>"` ו-`gh api -X DELETE .../labels/<name>`; לרשימה: `gh api repos/.../issues --paginate`.
