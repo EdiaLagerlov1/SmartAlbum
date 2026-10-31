@@ -121,7 +121,121 @@ def group_similar_photos(project_id: str, db: sqlite3.Connection) -> None:
     """
 ```
 
-**קונטרקט מול selection-engine**: אחרי `process_upload` + `group_similar_photos`, כל שורת `photos` רלוונטית מכילה `thumb_path`, `width/height`, `taken_at`, `sharpness_score`, `exposure_score`, `similarity_group_id` תקינים (או NULL אם לא ניתן לחשב). קונטרקט מול layout-engine ו-export-agent בלתי שינוי - ראה המסמך המלא (גרסה קודמת) לפירוט סעיפים 4.2-4.4, שלא שונו בעדכון הזה (רק תיקון שכבת API).
+**קונטרקט מול selection-engine**: אחרי `process_upload` + `group_similar_photos`, כל שורת `photos` רלוונטית מכילה `thumb_path`, `width/height`, `taken_at`, `sharpness_score`, `exposure_score`, `similarity_group_id` תקינים (או NULL אם לא ניתן לחשב).
+
+### 4.2 selection-engine → (DB) → layout-engine
+
+```python
+# selection_engine/api.py
+
+def set_flag(photo_id: str, flag: Literal["none", "must", "exclude"],
+             db: sqlite3.Connection) -> None:
+    """F03: כתיבת flag בודד."""
+
+@dataclass
+class MustCountCheck:
+    must_count: int
+    ok: bool                    # False אם must_count > 60
+
+def check_must_limit(project_id: str, db: sqlite3.Connection) -> MustCountCheck:
+    """F03: נקרא לפני run_selection."""
+
+def tag_event_stages(project_id: str, db: sqlite3.Connection) -> None:
+    """F05: מקבץ תמונות לפי taken_at. כתב photos.event_stage + event_stage_confidence.
+    כש-taken_at חסר או confidence נמוך -> photos.needs_stage_review = 1.
+    """
+
+@dataclass
+class SelectionResult:
+    status: Literal["ok", "too_many_must", "too_few_photos"]
+    selected_photo_ids: list[str]
+    message: str | None
+
+def run_selection(project_id: str, db: sqlite3.Connection) -> SelectionResult:
+    """F06: כולל את כל ה-must, מכבד את כל ה-exclude, מצמצם כפילויות לפי similarity_group_id.
+    status="too_many_must" אם >60 must. status="too_few_photos" אם סוך תמונות תקינות < 15.
+    בהצלחה: כותב photos.selected_for_album=1 + selection_order לנבחרות.
+    """
+```
+
+**קונטרקט מול layout-engine**: קורא `SELECT id FROM photos WHERE project_id=? AND selected_for_album=1 ORDER BY selection_order` - זו רשימת ה-photo_id הרשמית היחידה שהוא מקבל כקלט.
+
+### 4.3 layout-engine → (DB) → export-agent
+
+```python
+# layout_engine/api.py
+
+@dataclass
+class LayoutResult:
+    status: Literal["ok", "error"]
+    spread_ids: list[str]
+    message: str | None
+
+def generate_layout(
+    project_id: str,
+    selected_photo_ids: list[str],
+    db: sqlite3.Connection,
+    explicit_duplicates: set[str] | None = None,
+) -> LayoutResult:
+    """F07: בונה בדיוק 15 שורות spreads (position 1..15) ו-spread_photos לפי אחת מ-6 התבניות.
+    כל תמונה פעם אחת בכל האלבום אלא אם ב-explicit_duplicates.
+    """
+
+def regenerate_layout(project_id: str, db: sqlite3.Connection, **kwargs) -> LayoutResult:
+    """F08: הקורא (frontend-rtl) חייב לקבל אישור מפורש ולקרא ל-export_agent.snapshot_structure לפני.
+    """
+
+def replace_photo_in_slot(spread_id: str, slot_index: int, new_photo_id: str,
+                           db: sqlite3.Connection) -> bool:
+    """F08 החלפת תמונה: new_photo_id חייב להיות מתוך תמונות הפרויקט שאינן flag='exclude'."""
+
+def change_template(spread_id: str, new_template_id: str,
+                     db: sqlite3.Connection) -> bool:
+    """F08 שינוי תבנית."""
+```
+
+**קטלוג תבניות**: `template_id` מפתח למבנה קבוע (`layout_engine/templates.json`), שכל רשומה בו היא:
+
+```jsonc
+{
+  "id": "4up-grid",
+  "slot_count": 4,
+  "slots": [
+    {"index": 0, "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "orientation": "any", "dominant": false}
+  ]
+}
+```
+`orientation` ∈ `"landscape" | "portrait" | "any"`. `dominant: true` מסמן סלוט מרכזי (F07). frontend-rtl ו-export-agent קוראים את אותו ה-JSON.
+
+### 4.4 layout-engine → (DB) → export-agent
+
+```python
+# export_agent/api.py
+
+@dataclass
+class ExportResult:
+    status: Literal["ok", "error"]
+    pdf_path: str | None
+    structure_path: str | None
+    message: str | None
+
+def export_album(project_id: str, db: sqlite3.Connection) -> ExportResult:
+    """F09: מרנדר את אותו HTML/CSS של ה-preview ל-PDF (WeasyPrint), כותב גם album_structure.json.
+    """
+
+def snapshot_structure(project_id: str, db: sqlite3.Connection) -> str:
+    """F08: כותב את מצב ה-spreads הנוכחי ל-storage.export_structure_prev_path, לפני regenerate_layout.
+    """
+```
+
+---
+
+## 5. זרימת F08 "יצירה מחדש" (regenerate) - חוזה מלא
+
+1. frontend-rtl מציג modal אישור מפורש.
+2. בעת אישור: frontend-rtl קורא `export_agent.snapshot_structure(project_id)`.
+3. רק אז: frontend-rtl קורא `layout_engine.regenerate_layout(project_id, ...)`.
+4. אין undo אוטומטי בגרסת הבסיס; השחזור ידני מתוך album_structure_prev.json.
 
 ---
 
