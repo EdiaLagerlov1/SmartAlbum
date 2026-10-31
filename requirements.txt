@@ -12,6 +12,10 @@ pydantic==2.9.2
 # עיבוד תמונות (image-pipeline: F02 EXIF/thumbnails, F04 חדות/חשיפה/דמיון)
 Pillow==10.4.0
 imagehash==4.3.1             # perceptual hash לקיבוץ תמונות דומות (F04)
+                              # הערה (issue #5): PyPI חסום בסביבת הפיתוח/CI
+                              # הנוכחית אז זה בפועל לא מותקן כאן; image_pipeline/api.py
+                              # נופל בחזרה ל-average hash עצמאי (Pillow+numpy) אם
+                              # import imagehash נכשל - ראה INTERFACES.md סעיף 4.1.
 numpy==1.26.4
 
 # ייצוא PDF (export-agent: F09) - רינדור HTML/CSS זהה ל-preview ב-UI
