@@ -396,10 +396,13 @@ def test_group_similar_photos_groups_near_duplicates_not_different_photo(pipelin
 
     assert row_a["similarity_group_id"] is not None
     assert row_b["similarity_group_id"] is not None
-    assert row_c["similarity_group_id"] is not None
-
     assert row_a["similarity_group_id"] == row_b["similarity_group_id"]
-    assert row_c["similarity_group_id"] != row_a["similarity_group_id"]
+
+    # "different" אין לה אף תמונה דומה בפרויקט - נשארת תמונה יחידה, ולפי
+    # ההתנהגות הנוכחית של group_similar_photos (ראה docstring ב-
+    # image_pipeline/api.py) תמונה יחידה לא מקבלת קבוצה ייחודית לעצמה,
+    # אלא נשארת similarity_group_id=NULL.
+    assert row_c["similarity_group_id"] is None
 
     job = conn.execute(
         "SELECT status, error_reason FROM processing_jobs WHERE project_id = ? AND stage = 'grouping'",
@@ -412,19 +415,28 @@ def test_group_similar_photos_groups_near_duplicates_not_different_photo(pipelin
 
 def test_group_similar_photos_does_not_raise_and_skips_photos_without_thumbnail(pipeline_env):
     """F01/F10: תמונה שנכשלה ב-process_upload (אין thumb_path) לא מפילה
-    את group_similar_photos ולא מקבלת similarity_group_id."""
+    את group_similar_photos. שתי תמונות "תקינות" כמעט-זהות (אותו seed)
+    מתקבצות יחד; הקובץ הפגום לא יצר שורת photos כלל ולכן לא יכול לקבל
+    similarity_group_id - רק מאשרים שהקיבוץ לא קורס ומסתיים 'done'."""
     pipeline = pipeline_env["pipeline"]
     conn = pipeline_env["conn"]
     project_id = pipeline_env["project_id"]
     tmp_path = pipeline_env["tmp_path"]
 
-    ok_path = tmp_path / "ok.jpg"
-    _make_checkerboard_jpeg(ok_path, seed=7)
-    ok_result = pipeline.process_upload(
-        project_id=project_id, saved_file_path=str(ok_path),
-        original_filename="ok.jpg", db=conn,
+    ok_path_1 = tmp_path / "ok1.jpg"
+    ok_path_2 = tmp_path / "ok2.jpg"
+    _make_checkerboard_jpeg(ok_path_1, seed=7)
+    _make_checkerboard_jpeg(ok_path_2, seed=7)
+    ok_result_1 = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(ok_path_1),
+        original_filename="ok1.jpg", db=conn,
     )
-    assert ok_result.status == "done"
+    ok_result_2 = pipeline.process_upload(
+        project_id=project_id, saved_file_path=str(ok_path_2),
+        original_filename="ok2.jpg", db=conn,
+    )
+    assert ok_result_1.status == "done"
+    assert ok_result_2.status == "done"
 
     bad_path = tmp_path / "bad.jpg"
     bad_path.write_bytes(b"not a real image")
@@ -437,10 +449,17 @@ def test_group_similar_photos_does_not_raise_and_skips_photos_without_thumbnail(
     # לא אמור להעלות exception.
     pipeline.group_similar_photos(project_id, conn)
 
-    ok_row = conn.execute(
-        "SELECT similarity_group_id FROM photos WHERE id = ?", (ok_result.photo_id,)
+    ok_row_1 = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (ok_result_1.photo_id,)
     ).fetchone()
-    assert ok_row["similarity_group_id"] is not None
+    ok_row_2 = conn.execute(
+        "SELECT similarity_group_id FROM photos WHERE id = ?", (ok_result_2.photo_id,)
+    ).fetchone()
+    # שתי התמונות התקינות "כמעט-זהות" (אותו seed) - מתקבצות לאותה קבוצה
+    # לא-ריקה, ולא נשארות NULL (זה היה נשאר תמונה יחידה אילו הייתה רק אחת).
+    assert ok_row_1["similarity_group_id"] is not None
+    assert ok_row_2["similarity_group_id"] is not None
+    assert ok_row_1["similarity_group_id"] == ok_row_2["similarity_group_id"]
 
     # הקובץ הפגום לא יצר שורת photos כלל (ראה test_corrupt_file... מעלה) -
     # ומכאן שאין לו similarity_group_id לבדוק; רק מאשרים שהקיבוץ לא קרס.
