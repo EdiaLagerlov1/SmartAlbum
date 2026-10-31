@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SmartAlbum - אלבום חתונה אוטומטי</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>SmartAlbum</h1>
+    <p class="subtitle">פתיחת פרויקט והעלאת תמונות</p>
+  </header>
+
+  <main class="container">
+
+    <!-- פתיחת פרויקט -->
+    <section class="card" id="project-section">
+      <h2>פרויקט</h2>
+
+      <div class="project-form">
+        <label for="project-name">שם הפרויקט (למשל "חתונה - דנה ויוסי")</label>
+        <div class="row">
+          <input type="text" id="project-name" placeholder="שם הפרויקט" />
+          <button id="create-project-btn" class="btn btn-primary">פתיחת פרויקט חדש</button>
+        </div>
+        <p id="project-error" class="error-text" hidden></p>
+      </div>
+
+      <div id="project-info" class="project-info" hidden>
+        <span>פרויקט פעיל:</span>
+        <strong id="project-info-name"></strong>
+        <span class="muted">(מזהה: <code id="project-info-id"></code>)</span>
+      </div>
+    </section>
+
+    <!-- העלאת תמונות -->
+    <section class="card" id="upload-section" hidden>
+      <h2>העלאת תמונות</h2>
+      <p class="muted">עד 500 קבצי JPEG, עד 20MB לקובץ, עד 5GB לפרויקט. ניתן לגרור קבצים לאזור שלמטה או לבחור אותם.</p>
+
+      <div id="dropzone" class="dropzone">
+        <p>גררו לכאן קבצי JPEG, או</p>
+        <button id="browse-btn" class="btn btn-secondary" type="button">בחירת קבצים</button>
+        <input type="file" id="file-input" accept="image/jpeg,.jpg,.jpeg" multiple hidden />
+      </div>
+
+      <div class="upload-summary" id="upload-summary" hidden>
+        <span id="upload-summary-text"></span>
+      </div>
+
+      <ul id="upload-list" class="upload-list" aria-live="polite"></ul>
+    </section>
+
+    <!-- רשימת תמונות שהועלו -->
+    <section class="card" id="photos-section" hidden>
+      <h2>תמונות בפרויקט</h2>
+      <button id="refresh-photos-btn" class="btn btn-secondary">רענון רשימה</button>
+      <div id="photos-grid" class="photos-grid"></div>
+    </section>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
