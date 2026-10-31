@@ -203,6 +203,60 @@ def run_selection(project_id: str, db: sqlite3.Connection) -> SelectionResult:
 > לא להסתמך רק על frontend-rtl שיחסום; זו אכיפה כפולה (UI + שרת), כנדרש
 > ב-F03 ("דחה פעולה כזו ב-UI/API layer, לא רק בלוגיקה").
 
+> **עדכון (selection-engine, issue #6 / F05)**: `tag_event_stages` מומש בפועל
+> ב-`selection_engine/api.py` (חתימה זהה למה שתועד מעל, אין שינוי). נוסף
+> endpoint ב-`main.py` שהוא **עטיפת HTTP דקה 1:1** מעל הפונקציה (לפי הכלל
+> בסעיף 1):
+>
+> - `POST /api/projects/<project_id>/tag-stages` - מריץ `tag_event_stages`
+>   על כל תמונות הפרויקט, מחזיר `{"project_id", "photos": [{"photo_id",
+>   "event_stage", "event_stage_confidence", "needs_stage_review"}, ...],
+>   "needs_review_count"}`. 404 אם הפרויקט לא קיים. בלי body/פרמטרים - פועל
+>   על כל הפרויקט, לא per-photo (אין לוגיקת קיבוץ ב-route handler).
+>
+> **פער ידוע מ-image-pipeline (F02), מתועד כ-TODO - לא תוקן כאן**:
+> `image_pipeline.process_upload` (סעיף 4.1) **לא ממלא את `photos.taken_at`**
+> מה-EXIF (אין קריאת `DateTimeOriginal`/`DateTime` בקוד הקיים) - `taken_at`
+> נשאר `NULL` לכל התמונות בפועל, כל עוד image-pipeline לא יתוקן ב-issue
+> נפרד. `tag_event_stages` **בנויה בכוונה** כדי להתמודד עם זה בלי לקרוס:
+> NULL גורף -> כל התמונות מסומנות `needs_stage_review=1`,
+> `event_stage_confidence=0.0`, `event_stage=NULL` ("לא מנחש"), לא exception.
+> **TODO ל-image-pipeline**: להוסיף קריאת תג EXIF `DateTimeOriginal` (עם
+> fallback ל-`DateTime`) ב-`process_upload` וכתיבה ל-`photos.taken_at`
+> (ISO-8601) - ברגע שזה ייכתב, `tag_event_stages` תתחיל לחלק לשלבים בלי
+> שינוי קוד נוסף כאן.
+>
+> **אלגוריתם שמומש (gap-based clustering על `taken_at`, לא תוכן/embeddings)**:
+> "זמן ותוכן" באפיון F05 - החלק של "תוכן" (embeddings/ניתוח-סמנטי) אינו
+> ממומש כאן כי image-pipeline לא חושף embedding כזה (רק perceptual hash
+> לצמצום *כפילויות*, F04 - לא אותו דבר). לכן המימוש הנוכחי הוא **מבוסס-זמן
+> בלבד**: מיון כרונולוגי לפי `taken_at`, חלוקה לקבוצות-זמן רציפות בכל פעם
+> שהפער בין שתי תמונות עוקבות עולה על `EVENT_STAGE_GAP_SECONDS` (קבוע
+> מתועד ב-`selection_engine/api.py`, ערכו הנוכחי **2 שעות**), ומיפוי
+> פוזיציונלי (לא תוכן) של קבוצה כרונולוגית ראשונה/שנייה/... לרשימת שמות
+> קבועה:
+> ```python
+> EVENT_STAGE_SEQUENCE: tuple[str, ...] = ("getting_ready", "ceremony", "reception", "party")
+> ```
+> (שמות אלה כבר הוזכרו כדוגמה בהערת `schema.sql` על `event_stage` -
+> לא הומצאו כאן, רק מומשו/תועדו כקבוע בפועל). אם מתגלות **יותר** קבוצות-זמן
+> מאשר שמות ברשימה, או אם **כל** התמונות (עם timestamp) מתקבצות לקבוצה
+> אחת בודדת (אין אף פער גדול, אין בסיס לחלק) - התמונות הרלוונטיות מקבלות
+> `event_stage=NULL` עם ביטחון מתחת לסף (לא שם מנוחש). סף הביטחון
+> `EVENT_STAGE_CONFIDENCE_THRESHOLD = 0.5` (קבוע מתועד) קובע `needs_stage_review`.
+>
+> **"מאפשר למשתמשת לשנות סדר כפולות ידנית" (חלק מ-F05 באפיון, לא ממומש
+> כקוד כאן)**: זו בעיקרה אחריות **layout-engine (F07, עדיין לא ממומש)**.
+> `tag_event_stages` לא נועלת כלום - `event_stage`/`event_stage_confidence`/
+> `needs_stage_review` הם **המלצה הניתנת לשינוי ידני**, לא עובדה נעולה
+> (עקבי עם F08). **הערה ל-layout-engine, לתכנון מראש**: כש-F07/F08 ייבנו,
+> הסדר הכרונולוגי המוצע בתוך כפולה (למשל סדר תמונות מאותו `similarity_group_id`
+> שהמשתמשת בחרה לכלול יותר מאחת מהן - ראה F06 בהמשך) צריך תמיכה ב-override
+> ידני לסדר (לא רק ל"איזו תמונה" אלא גם ל"באיזה מיקום בכפולה") - אין שדה
+> DB נוסף נדרש לזה כרגע (`selection_order`/`spread_photos.slot_index`
+> הקיימים מספיקים), אבל אם יתגלה שצריך שדה נפרד ל"סדר כפולות ידני" -
+> זה עובר דרך ה-architect לפני מימוש, לא "מומצא" ע"י layout-engine.
+
 ### 4.3 layout-engine → (DB) → export-agent
 
 ```python

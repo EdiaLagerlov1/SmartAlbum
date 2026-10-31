@@ -34,6 +34,12 @@ INTERFACES.md סעיף 4.2):
   GET   /api/projects/<project_id>/must-count - ספירת תמונות 'must' +
                                               אינדיקציה אם עברו את הגבול (60).
 
+Endpoints (F05, issue #6 - עטיפת HTTP דקה מעל selection_engine.api.tag_event_stages,
+ראה INTERFACES.md סעיף 4.2):
+  POST  /api/projects/<project_id>/tag-stages - מריץ תיוג שלבי אירוע לכל
+                                              תמונות הפרויקט (מעדכן photos.event_stage/
+                                              event_stage_confidence/needs_stage_review).
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -504,6 +510,49 @@ def get_must_count(project_id: str):
         {
             "must_count": must_check.must_count,
             "must_count_exceeds_limit": not must_check.ok,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F05 (issue #6): תיוג שלבי אירוע. עטיפת HTTP דקה 1:1 מעל
+# selection_engine.api.tag_event_stages - אין לוגיקת קיבוץ/זמן כאן, ראה
+# INTERFACES.md סעיף 4.2. מריץ על *כל* תמונות הפרויקט (לא per-photo) -
+# לכן אין body/פרמטרים, רק project_id בנתיב.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/tag-stages", methods=["POST"])
+def tag_event_stages_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    selection_engine.tag_event_stages(project_id, conn)
+
+    rows = conn.execute(
+        """
+        SELECT id, event_stage, event_stage_confidence, needs_stage_review
+        FROM photos WHERE project_id = ?
+        ORDER BY uploaded_at ASC
+        """,
+        (project_id,),
+    ).fetchall()
+
+    needs_review_count = sum(1 for row in rows if row["needs_stage_review"])
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "photos": [
+                {
+                    "photo_id": row["id"],
+                    "event_stage": row["event_stage"],
+                    "event_stage_confidence": row["event_stage_confidence"],
+                    "needs_stage_review": bool(row["needs_stage_review"]),
+                }
+                for row in rows
+            ],
+            "needs_review_count": needs_review_count,
         }
     )
 
