@@ -22,9 +22,11 @@ gh issue create --title "[F03] סימון חובה/החרגה" \
 ```
 
 **2. ניהול Project board**
-- טור אחד ל-Backlog, אחד ל-In Progress, אחד ל-QA, אחד ל-Done.
-- כל issue עובר ל-QA רק אחרי שה-agent הרלוונטי פותח PR שמקשר אליו (`Closes #N`), לא לפני.
-- issue עובר ל-Done רק אחרי ש-qa-agent מאשר שהטסטים הרלוונטיים (ממטריצת הכיסוי שלו) עוברים.
+- ה-board: **github.com/users/EdiaLagerlov1/projects/1** ("SmartAlbum"), טורים Backlog/In Progress/QA/Done.
+- **מגבלה ידועה: אל תשתמש ב-`gh project` כדי לעדכן את ה-board.** סשן זה (Claude Code) חסום מגישה ל-GitHub GraphQL, ו-Project v2 (כולל `gh project item-edit`, `gh project item-add` עם שינוי status) עובד רק מעל GraphQL. קריאה כזו תמיד תיכשל עם "GitHub GraphQL is not available from Claude Code sessions" — אל תנסה שוב ושוב, זו לא תקלה זמנית.
+- **במקום זאת: כל הסטטוס מתנהל דרך labels על ה-issue** (`status:backlog` → `status:in-progress` → `status:stuck` אם נתקע), שזה REST API ועובד מלא. ה-board עצמו הוא תצוגה מסוננת לפי labels שהמשתמשת מתחזקת/מרפרשת ידנית בדפדפן — לא דבר שאתה כותב אליו.
+- כל issue עובר ל-QA (מבחינת label) רק אחרי שה-agent הרלוונטי פותח PR שמקשר אליו (`Closes #N`), לא לפני.
+- issue עובר ל-Done (מבחינת label) רק אחרי ש-qa-agent מאשר שהטסטים הרלוונטיים (ממטריצת הכיסוי שלו) עוברים.
 
 **3. מעקב סטטוס**
 - בודק מצב PRs פתוחים/ממוזגים (`gh pr list`, `gh pr status`) ומתאם מול issues פתוחים.
