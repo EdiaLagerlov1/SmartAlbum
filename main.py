@@ -13,7 +13,17 @@ Endpoints (F01):
   POST /api/projects/<project_id>/photos   - העלאת קובץ יחיד (multipart,
                                               שדה "file").
   GET  /api/projects/<project_id>/photos   - רשימת תמונות + סטטוס.
+                                              תומך בפרמטר query אופציונל
+                                              ?flag=none|must|exclude לסינון
+                                              (F03, issue #5).
   GET  /                                   - מגיש static/index.html.
+
+Endpoints (F03, issue #5 - עטיפת HTTP דקה מעל selection_engine.api, ראה
+INTERFACES.md סעיף 4.2):
+  PATCH /api/projects/<project_id>/photos/<photo_id> - עדכון flag בודד
+                                              (body: {"flag": "none"|"must"|"exclude"}).
+  GET   /api/projects/<project_id>/must-count - ספירת תמונות 'must' +
+                                              אינדיקציה אם עברו את הגבול (60).
 
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
@@ -32,6 +42,7 @@ from flask import Flask, g, jsonify, request, send_from_directory
 import db
 import storage
 from image_pipeline import api as image_pipeline
+from selection_engine import api as selection_engine
 
 # --- ולידציה בצד שרת (F01): רק JPEG, עד 20MB לקובץ -------------------------
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg"}
@@ -75,6 +86,12 @@ def _json_error(message: str, status: int, **extra):
 def _get_project_or_404(conn, project_id: str):
     return conn.execute(
         "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+
+
+def _get_photo_or_404(conn, project_id: str, photo_id: str):
+    return conn.execute(
+        "SELECT * FROM photos WHERE project_id = ? AND id = ?", (project_id, photo_id)
     ).fetchone()
 
 
@@ -250,16 +267,32 @@ def list_photos(project_id: str):
     if project is None:
         return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
 
-    rows = conn.execute(
-        """
+    # F03 (issue #5): סינון אופציונלי לפי flag, למשל לרשימת "תמונות חובה"
+    # נפרדת ב-UI. בלי הפרמטר - מתנהג כמקודם (כל התמונות, F01).
+    flag_filter = request.args.get("flag")
+    if flag_filter is not None and flag_filter not in selection_engine.VALID_FLAGS:
+        return _json_error(
+            f"ערך flag לא חוקי לסינון: {flag_filter!r} - מותר רק 'none', 'must' או 'exclude'",
+            400,
+            error_reason="invalid_flag",
+        )
+
+    query = """
         SELECT id, original_filename, file_size_bytes, uploaded_at, thumb_path,
                width, height, flag, error_reason
         FROM photos
         WHERE project_id = ?
+        {flag_clause}
         ORDER BY uploaded_at ASC
-        """,
-        (project_id,),
-    ).fetchall()
+        """
+    params: tuple = (project_id,)
+    if flag_filter is not None:
+        query = query.format(flag_clause="AND flag = ?")
+        params = (project_id, flag_filter)
+    else:
+        query = query.format(flag_clause="")
+
+    rows = conn.execute(query, params).fetchall()
 
     photos = []
     for row in rows:
@@ -282,6 +315,66 @@ def list_photos(project_id: str):
         )
 
     return jsonify(photos)
+
+
+# ---------------------------------------------------------------------------
+# F03 (issue #5): עדכון flag (none/must/exclude) לתמונה בודדה.
+# עטיפת HTTP דקה 1:1 מעל selection_engine.api.set_flag/check_must_limit -
+# אין לוגיקת בחירה כאן, ראה INTERFACES.md סעיף 4.2.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/photos/<photo_id>", methods=["PATCH"])
+def update_photo_flag(project_id: str, photo_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    photo = _get_photo_or_404(conn, project_id, photo_id)
+    if photo is None:
+        return _json_error(f"תמונה לא נמצאה: {photo_id}", 404, error_reason="photo_not_found")
+
+    payload = request.get_json(silent=True) or {}
+    if "flag" not in payload:
+        return _json_error("שדה 'flag' הוא שדה חובה בבקשה", 400)
+
+    flag = payload.get("flag")
+    try:
+        selection_engine.set_flag(photo_id, flag, conn)
+    except selection_engine.InvalidFlagError as exc:
+        return _json_error(str(exc), 400, error_reason="invalid_flag")
+
+    must_check = selection_engine.check_must_limit(project_id, conn)
+    updated = _get_photo_or_404(conn, project_id, photo_id)
+
+    return jsonify(
+        {
+            "photo_id": updated["id"],
+            "flag": updated["flag"],
+            "must_count": must_check.must_count,
+            "must_count_exceeds_limit": not must_check.ok,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F03 (issue #5): ספירת 'must' + אינדיקציה לחציית הגבול (60), בלי לשנות
+# כלום - נוח ל-UI כדי להציג אזהרה בלי לחכות לעדכון flag הבא (למשל בטעינת
+# דף הבחירה). עטיפת HTTP דקה מעל selection_engine.api.check_must_limit.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/must-count", methods=["GET"])
+def get_must_count(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    must_check = selection_engine.check_must_limit(project_id, conn)
+    return jsonify(
+        {
+            "must_count": must_check.must_count,
+            "must_count_exceeds_limit": not must_check.ok,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
