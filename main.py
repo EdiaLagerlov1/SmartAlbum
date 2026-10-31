@@ -18,7 +18,16 @@ Endpoints (F01):
                                               (F03, issue #5).
   GET  /                                   - מגיש static/index.html.
 
-Endpoints (F03, issue #5 - עטיפת HTTP דקה מעל selection_engine.api, ראה
+Endpoints (F10 - issue #11, ראה INTERFACES.md סעיף 5 לחוזה המלא):
+  GET    /api/projects/<project_id>/status - סטטוס גס (projects.status) +
+                                              per-stage (processing_jobs).
+  POST   /api/projects/<project_id>/retry  - ניסיון חוזר: קורא שוב
+                                              ל-image_pipeline.process_upload
+                                              רק על קבצים שנכשלו/לא הושלמו.
+  DELETE /api/projects/<project_id>        - מחיקת פרויקט (db.delete_project
+                                              בלבד - גם DB וגם קבצים).
+
+Endpoints (F03, issue #4 - עטיפת HTTP דקה מעל selection_engine.api, ראה
 INTERFACES.md סעיף 4.2):
   PATCH /api/projects/<project_id>/photos/<photo_id> - עדכון flag בודד
                                               (body: {"flag": "none"|"must"|"exclude"}).
@@ -32,7 +41,10 @@ INTERFACES.md סעיף 4.2):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import shutil
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -146,12 +158,18 @@ def list_projects():
 # ---------------------------------------------------------------------------
 # F01: העלאת תמונה יחידה
 # ---------------------------------------------------------------------------
-def _validate_upload(file_storage) -> str | None:
-    """ולידציה בסיסית לפני פנייה ל-pipeline. מחזיר הודעת שגיאה או None אם תקין."""
+def _validate_upload_filename(file_storage) -> str | None:
+    """בדיקה שיש שם קובץ כלל - לפני שקוראים/שומרים כל תוכן."""
     filename = file_storage.filename or ""
     if not filename:
         return "לא התקבל שם קובץ"
+    return None
 
+
+def _validate_upload_type(file_storage) -> str | None:
+    """בדיקת סוג קובץ (סיומת/content-type) - לא דורשת קריאת תוכן הקובץ.
+    מחזיר הודעת שגיאה או None אם תקין."""
+    filename = file_storage.filename or ""
     ext = os.path.splitext(filename)[1].lower()
     content_type = (file_storage.content_type or "").lower()
 
@@ -162,6 +180,88 @@ def _validate_upload(file_storage) -> str | None:
         return f"Content-Type לא נתמך ({content_type}) - רק JPEG מותר"
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# F10 (issue #11): "retry cache" - שומר את הקובץ הגולמי של כל העלאה שנכשלה
+# (ולידציה בצד שרת או כשל ב-image_pipeline), כדי ש-POST /retry יוכל לקרוא
+# שוב ל-image_pipeline.process_upload על אותו קובץ. ראה INTERFACES.md סעיף
+# 5.2: "process_upload לא 'זוכר' קבצים שנכשלו לפני שנכתבו ל-originals/" -
+# זו אחריות frontend-rtl לשמור את הקובץ בעצמו עד שהעיבוד מצליח.
+#
+# נשמר *תחת* storage.project_dir(project_id) (לא תיקייה/טבלה חדשה בחוזה
+# הרשמי) - כך שהוא מתנקה אוטומטית ב-db.delete_project (F10, 5.3) מבלי
+# לגעת ב-storage.py/db.py.
+# ---------------------------------------------------------------------------
+_RETRY_CACHE_DIRNAME = "_retry_cache"
+
+
+def _retry_cache_dir(project_id: str):
+    path = storage.project_dir(project_id) / _RETRY_CACHE_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _retry_cache_key(original_filename: str) -> str:
+    # hash ולא secure_filename - original_filename יכול להיות בעברית, ו-
+    # secure_filename מוריד תווים לא-ASCII (עלול לקצר לשם ריק).
+    return hashlib.sha256(original_filename.encode("utf-8")).hexdigest()
+
+
+def _retry_cache_manifest_path(project_id: str):
+    return _retry_cache_dir(project_id) / "manifest.json"
+
+
+def _load_retry_manifest(project_id: str) -> dict:
+    path = _retry_cache_manifest_path(project_id)
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_retry_manifest(project_id: str, manifest: dict) -> None:
+    _retry_cache_manifest_path(project_id).write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _cache_failed_upload(project_id: str, original_filename: str, tmp_path: str) -> None:
+    """שומר עותק של הקובץ הגולמי שנכשל, לשימוש ע"י POST /retry."""
+    key = _retry_cache_key(original_filename)
+    data_path = _retry_cache_dir(project_id) / f"{key}.bin"
+    shutil.copyfile(tmp_path, data_path)
+    manifest = _load_retry_manifest(project_id)
+    manifest[key] = original_filename
+    _save_retry_manifest(project_id, manifest)
+
+
+def _clear_cached_failed_upload(project_id: str, original_filename: str) -> None:
+    """מסירה קובץ מה-retry cache (נקרא כשהעיבוד הצליח - אין צורך יותר)."""
+    key = _retry_cache_key(original_filename)
+    data_path = _retry_cache_dir(project_id) / f"{key}.bin"
+    try:
+        data_path.unlink()
+    except OSError:
+        pass
+    manifest = _load_retry_manifest(project_id)
+    if key in manifest:
+        del manifest[key]
+        _save_retry_manifest(project_id, manifest)
+
+
+def _list_cached_failed_uploads(project_id: str) -> list[tuple[str, str]]:
+    """רשימת (original_filename, data_path) לכל קובץ שממתין ל-retry."""
+    manifest = _load_retry_manifest(project_id)
+    cache_dir = _retry_cache_dir(project_id)
+    result = []
+    for key, filename in manifest.items():
+        data_path = cache_dir / f"{key}.bin"
+        if data_path.is_file():
+            result.append((filename, str(data_path)))
+    return result
 
 
 def _save_upload_to_tempfile(file_storage, max_size: int):
@@ -201,19 +301,21 @@ def upload_photo(project_id: str):
 
     file_storage = request.files["file"]
 
-    validation_error = _validate_upload(file_storage)
-    if validation_error is not None:
+    filename_error = _validate_upload_filename(file_storage)
+    if filename_error is not None:
         return (
             jsonify(
                 {
                     "photo_id": None,
                     "status": "failed",
-                    "error_reason": validation_error,
+                    "error_reason": filename_error,
                     "original_filename": file_storage.filename,
                 }
             ),
             200,
         )
+
+    filename = file_storage.filename
 
     try:
         tmp_path, _size = _save_upload_to_tempfile(file_storage, _MAX_FILE_SIZE_BYTES)
@@ -224,7 +326,29 @@ def upload_photo(project_id: str):
                     "photo_id": None,
                     "status": "failed",
                     "error_reason": "הקובץ גדול מהמותר (מקסימום 20MB לקובץ)",
-                    "original_filename": file_storage.filename,
+                    "original_filename": filename,
+                }
+            ),
+            200,
+        )
+
+    # F10 (issue #11): סוג קובץ לא נתמך - נדחה בלי לקרוא ל-pipeline, אבל
+    # עדיין נשמר ב-retry cache כדי ש-POST /retry יוכל לנסות אותו מול
+    # image_pipeline.process_upload בעצמו (ראה INTERFACES.md סעיף 5.2).
+    type_error = _validate_upload_type(file_storage)
+    if type_error is not None:
+        _cache_failed_upload(project_id, filename, tmp_path)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return (
+            jsonify(
+                {
+                    "photo_id": None,
+                    "status": "failed",
+                    "error_reason": type_error,
+                    "original_filename": filename,
                 }
             ),
             200,
@@ -234,11 +358,18 @@ def upload_photo(project_id: str):
         result = image_pipeline.process_upload(
             project_id=project_id,
             saved_file_path=tmp_path,
-            original_filename=file_storage.filename,
+            original_filename=filename,
             db=conn,
         )
+        if result.status == "failed":
+            # F10: שומר את הקובץ הגולמי כדי שניסיון חוזר (POST /retry) יוכל
+            # לקרוא שוב ל-process_upload עליו.
+            _cache_failed_upload(project_id, filename, tmp_path)
+        else:
+            _clear_cached_failed_upload(project_id, filename)
     finally:
-        # הקובץ הזמני תמיד נמחק - process_upload כותב עותק עצמאי ל-originals/.
+        # הקובץ הזמני תמיד נמחק - עותק (אם צריך) כבר הועתק ל-retry cache,
+        # ו-process_upload כותב עותק עצמאי ל-originals/ בהצלחה.
         try:
             os.remove(tmp_path)
         except OSError:
@@ -250,7 +381,7 @@ def upload_photo(project_id: str):
                 "photo_id": result.photo_id,
                 "status": result.status,
                 "error_reason": result.error_reason,
-                "original_filename": file_storage.filename,
+                "original_filename": filename,
             }
         ),
         200,
@@ -393,6 +524,158 @@ def get_thumbnail(project_id: str, photo_id: str):
 
     directory, filename = os.path.split(row["thumb_path"])
     return send_from_directory(directory, filename, mimetype="image/jpeg")
+
+
+# ---------------------------------------------------------------------------
+# F10 (issue #11): כל שלבי processing_jobs - ראה INTERFACES.md סעיף 2 ו-5.1.
+# שלבים שאין להם שורה עדיין (מודול שלא קיים/לא רץ) מוצגים כ-"not_started" -
+# מצב נגזר בצד ה-API, לא ערך DB חדש.
+# ---------------------------------------------------------------------------
+_PROCESSING_STAGES = (
+    "upload",
+    "exif",
+    "thumbnail",
+    "grouping",
+    "tagging",
+    "selection",
+    "layout",
+    "export",
+)
+
+
+# ---------------------------------------------------------------------------
+# F10: GET /api/projects/<id>/status - סטטוס גס (projects.status) + מפורט
+# per-stage (processing_jobs). ראה INTERFACES.md סעיף 5.1 לחוזה המלא.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/status", methods=["GET"])
+def project_status(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    job_rows = conn.execute(
+        "SELECT stage, status, error_reason, updated_at FROM processing_jobs WHERE project_id = ?",
+        (project_id,),
+    ).fetchall()
+    jobs_by_stage = {row["stage"]: row for row in job_rows}
+
+    stages = {}
+    for stage in _PROCESSING_STAGES:
+        row = jobs_by_stage.get(stage)
+        if row is None:
+            stages[stage] = {"status": "not_started", "error_reason": None, "updated_at": None}
+        else:
+            stages[stage] = {
+                "status": row["status"],
+                "error_reason": row["error_reason"],
+                "updated_at": row["updated_at"],
+            }
+
+    photos_failed_count = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE project_id = ? AND error_reason IS NOT NULL",
+        (project_id,),
+    ).fetchone()[0]
+    photos_total_count = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()[0]
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "status": project["status"],
+            "stages": stages,
+            "photos_failed_count": photos_failed_count,
+            "photos_total_count": photos_total_count,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F10: POST /api/projects/<id>/retry - ניסיון חוזר. קורא שוב ל-
+# image_pipeline.process_upload *רק* על קבצים עם error_reason (שורת photos
+# קיימת שנכשלה) או קבצים שהועלו אך לא קיבלו שורת photos בהצלחה כלל (נדחו
+# בולידציה/נכשלו ב-pipeline לפני כתיבת שורה) - בהתאם ל-INTERFACES.md סעיף
+# 5.2. *לא* קורא process_upload על תמונות עם status="done" - אלה מסוננות
+# מראש (לא רק dedup בתוך process_upload עצמו).
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/retry", methods=["POST"])
+def retry_processing(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    cached = dict(_list_cached_failed_uploads(project_id))  # filename -> tmp copy path
+
+    retried = []
+    seen_filenames = set()
+
+    # (1) שורות photos שכבר נכשלו בפועל (error_reason IS NOT NULL) - רק אם
+    # יש לנו עדיין את הקובץ הגולמי שלהן ב-retry cache.
+    failed_photo_rows = conn.execute(
+        "SELECT id, original_filename FROM photos WHERE project_id = ? AND error_reason IS NOT NULL",
+        (project_id,),
+    ).fetchall()
+    for row in failed_photo_rows:
+        filename = row["original_filename"]
+        seen_filenames.add(filename)
+        data_path = cached.get(filename)
+        if data_path is None:
+            continue  # אין קובץ גולמי שמור - אין על מה להריץ retry
+
+        result = image_pipeline.process_upload(
+            project_id=project_id, saved_file_path=data_path, original_filename=filename, db=conn
+        )
+        if result.status == "done":
+            _clear_cached_failed_upload(project_id, filename)
+        retried.append(
+            {
+                "original_filename": filename,
+                "photo_id": result.photo_id,
+                "status": result.status,
+                "error_reason": result.error_reason,
+            }
+        )
+
+    # (2) קבצים שהועלו אך לא קיבלו שורת photos בהצלחה כלל (נדחו בולידציה
+    # או נכשלו ב-pipeline לפני כתיבת שורה) - כל מה שנשאר ב-retry cache.
+    for filename, data_path in cached.items():
+        if filename in seen_filenames:
+            continue
+        result = image_pipeline.process_upload(
+            project_id=project_id, saved_file_path=data_path, original_filename=filename, db=conn
+        )
+        if result.status == "done":
+            _clear_cached_failed_upload(project_id, filename)
+        retried.append(
+            {
+                "original_filename": filename,
+                "photo_id": result.photo_id,
+                "status": result.status,
+                "error_reason": result.error_reason,
+            }
+        )
+
+    return jsonify({"project_id": project_id, "retried": retried})
+
+
+# ---------------------------------------------------------------------------
+# F10: DELETE /api/projects/<id> - מחיקת פרויקט. קריאה יחידה ל-
+# db.delete_project (מוחקת גם DB וגם קבצים, ראה INTERFACES.md סעיף 5.3) -
+# אין לוגיקת מחיקה נוספת כאן. אישור מפורש הוא אחריות ה-UI, לא ה-backend.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>", methods=["DELETE"])
+def delete_project_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    db.delete_project(project_id)
+
+    return jsonify({"project_id": project_id, "deleted": True}), 200
 
 
 # ---------------------------------------------------------------------------

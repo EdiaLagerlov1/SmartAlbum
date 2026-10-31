@@ -13,6 +13,7 @@
 
   const state = {
     projectId: null,
+    projectName: null,
   };
 
   const el = {
@@ -32,7 +33,25 @@
     photosSection: document.getElementById("photos-section"),
     photosGrid: document.getElementById("photos-grid"),
     refreshPhotosBtn: document.getElementById("refresh-photos-btn"),
+    // F10 (issue #11): מצב עיבוד / ניסיון חוזר / מחיקת פרויקט.
+    statusSection: document.getElementById("status-section"),
+    refreshStatusBtn: document.getElementById("refresh-status-btn"),
+    retryBtn: document.getElementById("retry-btn"),
+    stagesList: document.getElementById("stages-list"),
+    photosFailedSummary: document.getElementById("photos-failed-summary"),
+    retryResult: document.getElementById("retry-result"),
+    deleteProjectBtn: document.getElementById("delete-project-btn"),
+    deleteModalOverlay: document.getElementById("delete-modal-overlay"),
+    deleteModalProjectName: document.getElementById("delete-modal-project-name"),
+    deleteConfirmInput: document.getElementById("delete-confirm-input"),
+    deleteModalError: document.getElementById("delete-modal-error"),
+    deleteConfirmBtn: document.getElementById("delete-confirm-btn"),
+    deleteCancelBtn: document.getElementById("delete-cancel-btn"),
   };
+
+  // מילת האישור ל-type-to-confirm במודל המחיקה (F10) - קבועה, לא תלויה
+  // ב-locale של הדפדפן.
+  const DELETE_CONFIRM_WORD = "מחיקה";
 
   // --------------------------------------------------------------------
   // יצירת פרויקט
@@ -63,12 +82,15 @@
       }
 
       state.projectId = body.project_id;
+      state.projectName = body.name;
       el.projectInfoName.textContent = body.name;
       el.projectInfoId.textContent = body.project_id;
       el.projectInfo.hidden = false;
       el.uploadSection.hidden = false;
       el.photosSection.hidden = false;
+      el.statusSection.hidden = false;
       await loadPhotos();
+      await loadStatus();
     } catch (err) {
       el.projectError.textContent = "שגיאת תקשורת עם השרת: " + err.message;
       el.projectError.hidden = false;
@@ -234,6 +256,7 @@
       (failed > 0 ? ` (${failed} נכשלו - פירוט בשורות למעלה)` : "");
 
     await loadPhotos();
+    await loadStatus();
   }
 
   // --------------------------------------------------------------------
@@ -272,6 +295,201 @@
     });
   }
 
+  // --------------------------------------------------------------------
+  // F10 (issue #11): מצב עיבוד per-stage, ניסיון חוזר, מחיקת פרויקט.
+  // --------------------------------------------------------------------
+  const STAGE_LABELS = {
+    upload: "העלאה",
+    exif: "תיקון כיוון (EXIF)",
+    thumbnail: "יצירת תמונות מוקטנות",
+    grouping: "קיבוץ תמונות דומות",
+    tagging: "תיוג שלבי אירוע",
+    selection: "בחירת תמונות לאלבום",
+    layout: "פריסת כפולות",
+    export: "ייצוא PDF",
+  };
+
+  const STAGE_ORDER = [
+    "upload",
+    "exif",
+    "thumbnail",
+    "grouping",
+    "tagging",
+    "selection",
+    "layout",
+    "export",
+  ];
+
+  const STATUS_LABELS = {
+    not_started: "לא התחיל",
+    pending: "מחכה",
+    running: "בתהליך",
+    done: "הושלם",
+    failed: "נכשל",
+  };
+
+  function renderStages(statusBody) {
+    el.stagesList.innerHTML = "";
+    let anyFailed = false;
+
+    STAGE_ORDER.forEach((stage) => {
+      const info = (statusBody.stages && statusBody.stages[stage]) || {
+        status: "not_started",
+        error_reason: null,
+      };
+      if (info.status === "failed") anyFailed = true;
+
+      const li = document.createElement("li");
+      li.className = "stage-item";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "stage-name";
+      nameSpan.textContent = STAGE_LABELS[stage] || stage;
+
+      const badge = document.createElement("span");
+      badge.className = "status-badge " + info.status;
+      badge.textContent = STATUS_LABELS[info.status] || info.status;
+
+      li.appendChild(nameSpan);
+      li.appendChild(badge);
+
+      if (info.status === "failed" && info.error_reason) {
+        const errorP = document.createElement("p");
+        errorP.className = "stage-error";
+        errorP.textContent = info.error_reason;
+        li.appendChild(errorP);
+      }
+
+      el.stagesList.appendChild(li);
+    });
+
+    el.retryBtn.hidden = !anyFailed;
+
+    if (typeof statusBody.photos_total_count === "number") {
+      el.photosFailedSummary.hidden = false;
+      el.photosFailedSummary.textContent =
+        `תמונות שנכשלו: ${statusBody.photos_failed_count} מתוך ${statusBody.photos_total_count}`;
+    } else {
+      el.photosFailedSummary.hidden = true;
+    }
+  }
+
+  async function loadStatus() {
+    if (!state.projectId) return;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/status`);
+      if (!resp.ok) return;
+      const body = await resp.json();
+      renderStages(body);
+    } catch (_err) {
+      // שקט - סטטוס הוא נוחות ל-UI, לא קריטי לזרימת ההעלאה עצמה.
+    }
+  }
+
+  async function retryProcessing() {
+    if (!state.projectId) return;
+    el.retryBtn.disabled = true;
+    el.retryResult.hidden = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/retry`, { method: "POST" });
+      const body = await resp.json();
+      if (!resp.ok) {
+        el.retryResult.hidden = false;
+        el.retryResult.textContent = (body && body.message) || "ניסיון חוזר נכשל";
+        return;
+      }
+
+      const retried = body.retried || [];
+      const succeeded = retried.filter((r) => r.status === "done").length;
+      el.retryResult.hidden = false;
+      el.retryResult.textContent = retried.length === 0
+        ? "אין קבצים שממתינים לניסיון חוזר."
+        : `ניסיון חוזר הושלם: ${succeeded} מתוך ${retried.length} הצליחו.`;
+
+      await loadPhotos();
+      await loadStatus();
+    } catch (err) {
+      el.retryResult.hidden = false;
+      el.retryResult.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.retryBtn.disabled = false;
+    }
+  }
+
+  // --------------------------------------------------------------------
+  // F10: מחיקת פרויקט - אישור מפורש (type-to-confirm) לפני ה-request,
+  // כי זו פעולה בלתי-הפיכה (מוחקת גם מקורות/תוצרים, ראה INTERFACES.md 5.3).
+  // --------------------------------------------------------------------
+  function openDeleteModal() {
+    el.deleteModalProjectName.textContent = state.projectName || "";
+    el.deleteConfirmInput.value = "";
+    el.deleteModalError.hidden = true;
+    el.deleteConfirmBtn.disabled = true;
+    el.deleteModalOverlay.hidden = false;
+    el.deleteConfirmInput.focus();
+  }
+
+  function closeDeleteModal() {
+    el.deleteModalOverlay.hidden = true;
+  }
+
+  function resetProjectUi() {
+    state.projectId = null;
+    state.projectName = null;
+    el.projectInfo.hidden = true;
+    el.uploadSection.hidden = true;
+    el.photosSection.hidden = true;
+    el.statusSection.hidden = true;
+    el.uploadList.innerHTML = "";
+    el.uploadSummary.hidden = true;
+    el.photosGrid.innerHTML = "";
+    el.stagesList.innerHTML = "";
+    el.retryBtn.hidden = true;
+    el.retryResult.hidden = true;
+    el.photosFailedSummary.hidden = true;
+    el.projectNameInput.value = "";
+  }
+
+  async function confirmDeleteProject() {
+    if (!state.projectId) return;
+    if (el.deleteConfirmInput.value.trim() !== DELETE_CONFIRM_WORD) {
+      el.deleteModalError.hidden = false;
+      el.deleteModalError.textContent = `יש להקליד בדיוק "${DELETE_CONFIRM_WORD}" כדי לאשר מחיקה`;
+      return;
+    }
+
+    el.deleteConfirmBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}`, { method: "DELETE" });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => null);
+        el.deleteModalError.hidden = false;
+        el.deleteModalError.textContent = (body && body.message) || "מחיקת הפרויקט נכשלה";
+        return;
+      }
+
+      closeDeleteModal();
+      resetProjectUi();
+    } catch (err) {
+      el.deleteModalError.hidden = false;
+      el.deleteModalError.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.deleteConfirmBtn.disabled = false;
+    }
+  }
+
   el.createProjectBtn.addEventListener("click", createProject);
   el.refreshPhotosBtn.addEventListener("click", loadPhotos);
+  el.refreshStatusBtn.addEventListener("click", loadStatus);
+  el.retryBtn.addEventListener("click", retryProcessing);
+  el.deleteProjectBtn.addEventListener("click", openDeleteModal);
+  el.deleteCancelBtn.addEventListener("click", closeDeleteModal);
+  el.deleteConfirmBtn.addEventListener("click", confirmDeleteProject);
+  el.deleteConfirmInput.addEventListener("input", () => {
+    el.deleteConfirmBtn.disabled = el.deleteConfirmInput.value.trim() !== DELETE_CONFIRM_WORD;
+  });
+  // סגירה בלחיצה מחוץ לתוכן ה-modal (לא רק כפתור ביטול).
+  el.deleteModalOverlay.addEventListener("click", (e) => {
+    if (e.target === el.deleteModalOverlay) closeDeleteModal();
+  });
 })();
