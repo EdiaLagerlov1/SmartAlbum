@@ -2,8 +2,10 @@
 # התקנה: python3 -m pip install -r requirements.txt
 
 # שרת / API
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+# הוחלף מ-FastAPI ל-Flask: PyPI חסום ברשת סביבת הפיתוח/CI של הפרויקט הזה,
+# ו-Flask/Werkzeug כבר מותקנים מראש - ראה INTERFACES.md סעיף 1 להערה המלאה.
+Flask==3.1.3
+Werkzeug==3.1.9
 python-multipart==0.0.9      # קליטת קבצים (F01 - העלאת JPEGs)
 pydantic==2.9.2
 
@@ -17,4 +19,4 @@ weasyprint==62.3
 
 # טסטים (qa-agent)
 pytest==8.3.3
-httpx==0.27.2                # TestClient עבור FastAPI
+# Flask מגיע עם app.test_client() מובנה - אין צורך ב-httpx/TestClient נפרד.
