@@ -65,7 +65,7 @@ DB יחיד: `storage/smartalbum.db`. טבלאות (פירוט מלא ועם ה�
 | `processing_jobs` | סטטוס per-stage per-project | image-pipeline, selection-engine, layout-engine, export-agent |
 
 נקודות מפתח:
-- **`photos.flag`** שדה יחיד (`none|must|exclude`) - לא שני בוליאנים, כך שלא ניתן טכנית שיהיה גם must וגם exclude בו-זמנית (F03).
+- **`photos.flag`** שדה יחיד (`none|must|exclude`) - לא שני בוליאניים, כך שלא ניתן טכנית שיהיה גם must וגם exclude בו-זמנית (F03).
 - **`photos.selected_for_album` / `selection_order`** - זה הממשק שבין selection-engine ל-layout-engine.
 - **`spreads.version`** - מקופץ בכל "יצירה מחדש" (F08).
 - **`processing_jobs`** - שורה אחת per `(project_id, stage)`. stages: `upload, exif, thumbnail, grouping, tagging, selection, layout, export`.
@@ -169,6 +169,39 @@ def run_selection(project_id: str, db: sqlite3.Connection) -> SelectionResult:
 ```
 
 **קונטרקט מול layout-engine**: קורא `SELECT id FROM photos WHERE project_id=? AND selected_for_album=1 ORDER BY selection_order` - זו רשימת ה-photo_id הרשמית היחידה שהוא מקבל כקלט.
+
+> **עדכון (selection-engine, issue #5 / F03)**: `selection_engine/api.py` מומש בפועל
+> (`set_flag`, `MustCountCheck`, `check_must_limit` - חתימות זהות למה שתועד מעל,
+> אין שינוי). נוספו שני endpoints ב-`main.py` שהם **עטיפת HTTP דקה 1:1** מעל
+> הפונקציות האלה (לפי הכלל בסעיף 1 - אין לוגיקה נוספת ב-route handler):
+>
+> - `PATCH /api/projects/<project_id>/photos/<photo_id>` עם body `{"flag": "none"|"must"|"exclude"}`.
+>   קורא ל-`set_flag` ואז ל-`check_must_limit`, מחזיר
+>   `{"photo_id", "flag", "must_count", "must_count_exceeds_limit"}`.
+>   ערך `flag` שאינו אחד משלושת הערכים -> `400` עם הודעת שגיאה בעברית
+>   (`error_reason: "invalid_flag"`), **לא** מגיע ל-DB (ה-`CHECK` constraint
+>   ב-schema.sql הוא הגנת-עומק, לא התגובה הראשית למשתמשת).
+>   עדכון flag קיים (למשל `must` -> `exclude`) הוא **דריסה** של הערך הקודם -
+>   אין "שני flags" שנשארים, כי `flag` הוא עמודה יחידה (ראה סעיף 2).
+> - `GET /api/projects/<project_id>/must-count` - עטיפה דקה מעל
+>   `check_must_limit`, מחזיר `{"must_count", "must_count_exceeds_limit"}`
+>   בלי לשנות כלום (שימושי ל-UI כדי להציג אזהרה בלי לחכות לעדכון flag הבא).
+> - `GET /api/projects/<project_id>/photos` (קיים, F01) הורחב עם פרמטר query
+>   אופציונל `?flag=none|must|exclude` לסינון; בלי הפרמטר הוא מחזיר הכל
+>   כמקודם (לא שובר התנהגות קיימת/טסטים קיימים). `flag` כבר הוחזר
+>   עשורה שורה מאז F01 (ללא שינוי).
+>
+> **כלל חסימת-יצירה (F03 <-> F06, קריטי ל-layout-engine)**: "יצירה" = כל קריאה
+> ל-`run_selection` (F06) ובהמשך ל-`generate_layout`/`regenerate_layout`
+> (F07/F08) - **אסור** שתתבצע כל עוד `check_must_limit(project_id, db).ok is
+> False` (כלומר `must_count > 60`). זו לא חסימה על הסימון עצמו - המשתמשת
+> יכולה לסמן יותר מ-60 תמונות `must` ולהמשיך לראות אותן ב-UI; האזהרה
+> (`must_count_exceeds_limit=true`) חייבת להיות גלויה וה"יצירה" חסומה עד
+> שהמשתמשת מתקנת בחירה (מורידה `must` מתמונות, חוזרת ל-<=60). `run_selection`
+> (כשיתממש) **חייב** לקרוא ל-`check_must_limit` כצעד ראשון ולהחזיר
+> `status="too_many_must"` בלי לכתוב `selected_for_album` כלל אם לא תקין -
+> לא להסתמך רק על frontend-rtl שיחסום; זו אכיפה כפולה (UI + שרת), כנדרש
+> ב-F03 ("דחה פעולה כזו ב-UI/API layer, לא רק בלוגיקה").
 
 ### 4.3 layout-engine → (DB) → export-agent
 
