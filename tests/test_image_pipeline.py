@@ -396,10 +396,13 @@ def test_group_similar_photos_groups_near_duplicates_not_different_photo(pipelin
 
     assert row_a["similarity_group_id"] is not None
     assert row_b["similarity_group_id"] is not None
-    assert row_c["similarity_group_id"] is not None
+    # row_c היא תמונה "יחידה" (אין תמונה דומה לה בפרויקט) - לפי החוזה
+    # המתועד ב-INTERFACES.md סעיף 4.1 (ו-group_similar_photos docstring),
+    # תמונה יחידה נשארת similarity_group_id=NULL ולא מקבלת קבוצה ייחודית
+    # לעצמה.
+    assert row_c["similarity_group_id"] is None
 
     assert row_a["similarity_group_id"] == row_b["similarity_group_id"]
-    assert row_c["similarity_group_id"] != row_a["similarity_group_id"]
 
     job = conn.execute(
         "SELECT status, error_reason FROM processing_jobs WHERE project_id = ? AND stage = 'grouping'",
@@ -412,7 +415,10 @@ def test_group_similar_photos_groups_near_duplicates_not_different_photo(pipelin
 
 def test_group_similar_photos_does_not_raise_and_skips_photos_without_thumbnail(pipeline_env):
     """F01/F10: תמונה שנכשלה ב-process_upload (אין thumb_path) לא מפילה
-    את group_similar_photos ולא מקבלת similarity_group_id."""
+    את group_similar_photos. התמונה התקינה היחידה שנשארת היא "יחידה"
+    (אין תמונה דומה אחרת בפרויקט) ולכן נשארת similarity_group_id=NULL
+    לפי החוזה המתועד ב-INTERFACES.md סעיף 4.1 - העיקר כאן הוא שהריצה
+    לא קורסת/לא מעלה exception."""
     pipeline = pipeline_env["pipeline"]
     conn = pipeline_env["conn"]
     project_id = pipeline_env["project_id"]
@@ -440,7 +446,8 @@ def test_group_similar_photos_does_not_raise_and_skips_photos_without_thumbnail(
     ok_row = conn.execute(
         "SELECT similarity_group_id FROM photos WHERE id = ?", (ok_result.photo_id,)
     ).fetchone()
-    assert ok_row["similarity_group_id"] is not None
+    # "יחידה" (אין עוד תמונה תקינה בפרויקט) -> נשארת NULL, ראה הערה למעלה.
+    assert ok_row["similarity_group_id"] is None
 
     # הקובץ הפגום לא יצר שורת photos כלל (ראה test_corrupt_file... מעלה) -
     # ומכאן שאין לו similarity_group_id לבדוק; רק מאשרים שהקיבוץ לא קרס.
