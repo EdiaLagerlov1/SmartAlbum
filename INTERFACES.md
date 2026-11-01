@@ -21,7 +21,7 @@
 | DB | SQLite, קובץ יחיד `storage/smartalbum.db` | ניגשים אליו **רק** דרך `db.get_connection()`. אין DB נפרד למודול. stdlib `sqlite3`, לא ORM - הסכמה פשוטה מספיק. |
 | עיבוד תמונות | Pillow (EXIF, thumbnails, resize) + `imagehash` (perceptual hash לדמיון, F04) + Laplacian-variance/numpy לחדות | ראה `image-pipeline.md`. |
 | Frontend | HTML/CSS/JS סטטי, `dir="rtl"`, ללא build step כבוי (אין React/Vue חובה; אפשר Vanilla JS או Alpine.js קל) | מוגש ע"י Flask (`static_folder`) או שרת סטטי נפרד בפיתוח. |
-| ייצוא PDF | WeasyPrint, מרנדר את **אותו HTML/CSS** שה-preview ב-UI מציג | כדי להבטיח "PDF זהה ל-preview" (F09) - ראה `export-agent.md`. |
+| ייצוא PDF | WeasyPrint (מתוכנן), מרנדר את **אותו HTML/CSS** שה-preview ב-UI מציג; **בפועל הוחלף ב-`reportlab`** (issue #10/F09) - WeasyPrint לא ניתן להתקין בסביבת הפיתוח/CI הנוכחית (PyPI חסום + תלויות-מערכת חסרות), ראה הערת-היישום בסעיף 4.4 | כדי להבטיח "PDF זהה ל-preview" (F09) - ראה `export-agent.md`. |
 | טסטים | pytest (unit/integration), Flask `test_client()` (API), Cypress (E2E/UI - `qa-agent`) | |
 
 > **הערה (architect, עדכון לאחר #1)**: הבחירה המקורית הייתה FastAPI+uvicorn+httpx.
@@ -457,7 +457,8 @@ def change_template(spread_id: str, new_template_id: str,
 > api.py` (חתימות זהות למה שתועד מעל בסעיף הזה - אין שינוי). וכן
 > `export_agent.snapshot_structure` מומשה ב-`export_agent/api.py` (חדש -
 > ראה סעיף 4.4 מעלה; `export_agent.export_album`/F09 **לא** ממומשת, נשארת
-> "חוזה מיועד" לעתיד, issue #10). **לא נוסף שום endpoint ב-`main.py` ב-commit
+> "חוזה מיועד" לעתיד, issue #10 - **עדכון**: מומשה מאז, ראה הערת (export-agent,
+> issue #10 / F09) מעלה בסעיף הזה). **לא נוסף שום endpoint ב-`main.py` ב-commit
 > הזה** - החיווט ל-HTTP/UI (כולל ה-modal אישור בסעיף 6) הוא commit נפרד,
 > `frontend-rtl`, על אותו branch.
 >
@@ -544,18 +545,61 @@ def change_template(spread_id: str, new_template_id: str,
 > slot_index/photo_id/is_dominant) לנתיב `storage.export_structure_prev_path
 > (project_id)` (עמודה/פונקציה שכבר הייתה מתועדת/קיימת ב-`storage.py` -
 > לא נוסף שדה חדש), ומחזירה את הנתיב כ-`str`. **ללא תלות ב-WeasyPrint/
-> רינדור HTML בכלל** - `export_album`/`ExportResult` (F09, issue #10,
-> עדיין חסום) **לא** ממומשים כאן ולא נגענו בהם - אין פונקציית
-> `export_album` כלל במודול בהיקף הזה (לא stub חלקי, לפי ההנחיה המפורשת
-> שלא "לממש-חצי"). פורמט ה-JSON לא מתועד כחוזה-API מחייב מעבר למה שסעיף 6
-> כבר קובע ("השחזור ידני מתוך album_structure_prev.json") - אין קוד
-> אוטומטי שמפענח את הקובץ חזרה ל-DB בהיקף הזה (restore הוא ידני, כמו
+> רינדור HTML בכלל**. פורמט ה-JSON לא מתועד כחוזה-API מחייב מעבר למה
+> שסעיף 6 כבר קובע ("השחזור ידני מתוך album_structure_prev.json") - אין
+> קוד אוטומטי שמפענח את הקובץ חזרה ל-DB בהיקף הזה (restore הוא ידני, כמו
 > שסעיף 6 כבר קבע, לא "undo אוטומטי").
 >
 > `processing_jobs` (stage `'layout'`) מתעדכן ב-`regenerate_layout` **באותה
 > תבנית בדיוק** כמו `generate_layout` (משתפות את `_run_layout_algorithm`) -
 > `replace_photo_in_slot`/`change_template` **לא** נוגעות ב-`processing_jobs`
 > בכלל (עריכות-ידניות בודדות על כפולה אחת, לא "הרצת שלב pipeline" מחדש).
+
+> **עדכון (export-agent, issue #10 / F09)**: `export_album(project_id, db)
+> -> ExportResult` מומש בפועל (חתימה/dataclass `ExportResult` זהים למה
+> שתועד בסעיף 4.4 - אין שינוי). **תחליף ל-WeasyPrint**: בדיוק כמו הערת
+> ה-architect על FastAPI/httpx (סעיף 1) והערת image-pipeline על
+> `imagehash` (סעיף 4.1) - בסביבת הפיתוח/CI הנוכחית PyPI חסום ו-WeasyPrint
+> **לא ניתן להתקין בפועל** (גם תלויות-המערכת שלו - Pango/Cairo - חסרות).
+> לכן `export_album` משתמש ב-**reportlab** (מותקן מראש, pure-Python) כדי
+> לייצר את ה-PDF ישירות: במקום לרנדר HTML/CSS, הפונקציה קוראת את
+> קואורדינטות השבר (x/y/w/h) של הסלוטים **מאותו קטלוג תבניות בדיוק**
+> (`layout_engine.api.TEMPLATES`, הנטען מ-`templates.json`) שה-UI/
+> layout-engine קוראים, ממירה אותן למלבנים בנקודות PDF, ומציירת כל תמונה
+> (מ-`photos.original_path`, לא thumbnail - זו תוצר ביקורת ברזולוציה
+> מלאה) לתוך המלבן שלה עם **center-crop** (שקול ל-`object-fit: cover` של
+> `.spread-photo-slot img` ב-`static/style.css`) דרך Pillow, לפני ציור
+> ל-canvas. הסדר זהה ל-`GET /api/projects/<id>/spreads` (`spread_photos`
+> ממוין לפי `slot_index`) - אותו מקור-אמת, לא חישוב סדר/פריסה נפרד. עמוד
+> PDF אחד = כפולה אחת (לא "2 עמודים לכפולה"). **TODO**: אם WeasyPrint
+> (ותלויות-המערכת שלו) יותקנו בעתיד (production עם גישת רשת) - אפשר לשקול
+> מעבר לרינדור HTML/CSS אמיתי; זה עדכון ל-INTERFACES.md לפני קוד, כרגיל.
+>
+> **בדיקת-תקינות לפני ייצוא** (לפי `.claude/agents/export-agent.md`,
+> "אל תיצור PDF אם יש תמונות must שלא נכללו, או אם המספר הכולל חורג
+> מ-60"): נבדק לפי מה שבאמת משובץ ב-`spread_photos` הנוכחיים של הפרויקט
+> (photo_id ייחודיים) - לא `photos.selected_for_album`. הפרה של אחד
+> התנאים -> **לא** נכתב PDF/JSON כלל, `processing_jobs` stage='export'
+> מתעדכן ל-`failed` עם `error_reason` (הודעה בעברית), ומוחזר
+> `ExportResult(status="error", pdf_path=None, structure_path=None,
+> message=...)`. `processing_jobs` stage='export' עוקב אחרי אותה קונבנציית
+> pending->running->done/failed בדיוק כמו image_pipeline/selection_engine/
+> layout_engine (`_set_job_status` מוחזק בנפרד ב-`export_agent/api.py`,
+> לא מיובא - לפי כלל סעיף 1).
+>
+> `album_structure.json` (`storage.export_structure_path`) נכתב רק
+> בהצלחה - **הוא המבנה הסופי של האלבום**, לא `album_structure_prev.json`
+> של F08 (ה"גיבוי לפני יצירה מחדש"); אותה צורת-JSON בדיוק (position/
+> template_id/version/updated_at + photos עם slot_index/photo_id/
+> is_dominant per spread), רק מפתח-timestamp שונה (`exported_at` במקום
+> `snapshotted_at`) כדי לא להתבלבל בין השניים.
+>
+> **מחיקת פרויקט (F10)**: `db.delete_project` (קיים מ-F10, issue #11) כבר
+> קורא ל-`storage.delete_project_files` שמוחק את כל `storage/projects/
+> <id>/` כולל `exports/` (`album.pdf`/`album_structure.json`/
+> `album_structure_prev.json`) - **אין שינוי נדרש כאן**; לא נוסף נתיב-קובץ
+> חדש מעבר למה שכבר מתועד ב-`storage.py` (`export_pdf_path`/
+> `export_structure_path`).
 
 > **עדכון (frontend-rtl, issue #9 / F08)**: חיווט ה-HTTP/UI מעל שלוש
 > הפונקציות של layout-engine (מעלה) ומעל `export_agent.snapshot_structure`
@@ -641,6 +685,20 @@ def snapshot_structure(project_id: str, db: sqlite3.Connection) -> str:
     """F08: כותב את מצב ה-spreads הנוכחי ל-storage.export_structure_prev_path, לפני regenerate_layout.
     """
 ```
+
+> **הערת-יישום (export-agent, issue #10)**: החתימות/dataclass מעלה
+> **לא השתנו** - `export_album`/`ExportResult` מומשו בפועל ב-`export_agent/
+> api.py` בדיוק לפי מה שמתועד כאן. פרט-היישום היחיד שסוטה מה-docstring
+> המקורי: **WeasyPrint הוחלף ב-`reportlab`** (WeasyPrint לא ניתן להתקין
+> בסביבת הפיתוח/CI הנוכחית - PyPI חסום, וגם תלויות-המערכת שלו חסרות) -
+> `export_album` מחשבת ישירות את גיאומטריית הסלוטים מ-`layout_engine.api.
+> TEMPLATES` (אותו קטלוג תבניות בדיוק שה-UI קורא, לא לוגיקת-פריסה חדשה)
+> וממירה ל-PDF עם Pillow (center-crop, שקול ל-CSS `object-fit: cover`) +
+> `reportlab.pdfgen.canvas`, במקום לרנדר HTML/CSS. ראה הערה מפורטת יותר
+> בהערת-המודול העליונה של `export_agent/api.py` ובהערת (export-agent,
+> issue #10 / F09) מעלה (אחרי הערת ה-architect על `export_agent/api.py`
+> בסעיף 4.3) - אנלוגי בדיוק להערת `imagehash` -> average-hash fallback
+> ב-image-pipeline (סעיף 4.1).
 
 ---
 
