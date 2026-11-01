@@ -355,3 +355,183 @@ input[type="text"] {
 [hidden] {
   display: none !important;
 }
+
+/* F08 (issue #9): תצוגת כפולות האלבום + החלפת תמונה/שינוי תבנית.
+   חשוב: הגריד הגיאומטרי של כל תבנית (x/y/w/h מ-templates.json) מוצג
+   כמו שהוא - *לא* מראה (mirror) תחת RTL, לפי כללי המודול (תבניות
+   הכפולות עצמן אינן תוכן-טקסט, אלא פריסה חזותית קבועה שה-export/PDF
+   מרנדר *זהה* ל-preview). לכן left/top/width/height כאן הם ערכים
+   פיסיים (physical), לא logical (לא inset-inline-*). כל שאר ה-chrome
+   (כפתורים/badges) יכול להשתמש ב-RTL-aware styling רגיל. */
+.spreads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.spread-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.spread-card-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.spread-title {
+  font-weight: 700;
+}
+
+.spread-template-name {
+  direction: ltr;
+  unicode-bidi: embed;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+/* "כפולה" = שני עמודים צמודים, לכן יחס-רוחב-גובה 2:1 - פריסה פיסית קבועה
+   שלא מתהפכת ב-RTL (ראה הערה מעל). */
+.spread-visual {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  background: #1b1f2a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.spread-slot {
+  position: absolute;
+  overflow: hidden;
+  background: #2c3345;
+  box-shadow: inset 0 0 0 2px #fff;
+}
+
+.spread-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* תמונה דומיננטית מובחנת ויזואלית (מסגרת בולטת + badge) - עקבי עם
+   שימוש חוזר ב-.status-badge הקיים (F01/F10) ולא ממציא וריאנט-צבע חדש. */
+.spread-slot.slot-dominant {
+  box-shadow: inset 0 0 0 4px #ffcf4d;
+  z-index: 2;
+}
+
+.slot-dominant-badge {
+  position: absolute;
+  top: 0.35rem;
+  inset-inline-end: 0.35rem;
+  background: #ffcf4d;
+  color: #4b3600;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+}
+
+.slot-swap-btn {
+  position: absolute;
+  bottom: 0.35rem;
+  inset-inline-start: 0.35rem;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.6rem;
+  opacity: 0.92;
+}
+
+/* F08: modal רחב יותר לבורר תמונות/תבניות (grid רחב מה-modal הבסיסי). */
+.modal-box-wide {
+  max-width: 760px;
+}
+
+.picker-grid {
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.photo-card.picker-thumb {
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: border-color 0.12s;
+}
+
+.photo-card.picker-thumb:hover {
+  border-color: #2c3e6b;
+}
+
+.photo-card.picker-thumb-current {
+  border-color: #ffcf4d;
+}
+
+.template-picker-grid {
+  margin-top: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.75rem;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.template-picker-card {
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.5rem;
+  text-align: center;
+  cursor: pointer;
+  background: #fafafa;
+}
+
+.template-picker-card:hover {
+  border-color: #2c3e6b;
+}
+
+.template-picker-card.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.template-picker-card.disabled:hover {
+  border-color: #e5e7eb;
+}
+
+.template-picker-card.template-picker-card-current {
+  border-color: #16793a;
+}
+
+.template-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.4rem;
+}
+
+.template-preview-slot {
+  position: absolute;
+  background: #aab4cc;
+  box-shadow: inset 0 0 0 1px #fff;
+}
+
+.template-preview-slot.dominant {
+  background: #2c3e6b;
+}
+
+.template-picker-label {
+  font-size: 0.78rem;
+  color: #4b5563;
+  direction: ltr;
+  unicode-bidi: embed;
+}

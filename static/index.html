@@ -59,6 +59,28 @@
       <div id="photos-grid" class="photos-grid"></div>
     </section>
 
+    <!-- F08 (issue #9): תצוגת 15 הכפולות של האלבום, עם החלפת תמונה ושינוי
+         תבנית לכל כפולה. כל פעולה (replace-photo/change-template) נשמרת
+         באופן מיידי בשרת (commit), ו"פתיחה מחדש" = GET טרי ל-/spreads -
+         ראה INTERFACES.md סעיף 4.3. -->
+    <section class="card" id="spreads-section" hidden>
+      <h2>כפולות האלבום</h2>
+      <p class="muted">
+        15 הכפולות שנוצרו לאלבום. ניתן להחליף תמונה בכל סלוט (רק מתוך תמונות
+        הפרויקט שלא הוחרגו) ולשנות את תבנית הכפולה. כל שינוי נשמר מיידית בשרת.
+      </p>
+      <div class="row">
+        <button id="refresh-spreads-btn" class="btn btn-secondary">רענון כפולות</button>
+        <!-- נוחות בלבד: אין עדיין UI ל-F06/F07 (בחירת תמונות/יצירת פריסה
+             ראשונית) - הכפתור הזה רק מריץ את ה-endpoints הקיימים שלהם כדי
+             שיהיה מה להציג כאן; אינו מממש לוגיקת בחירה/פריסה בעצמו. -->
+        <button id="bootstrap-layout-btn" class="btn btn-primary" hidden>הרצת בחירה ויצירת 15 כפולות</button>
+      </div>
+      <p id="spreads-empty-msg" class="muted" hidden>לא נוצרה עדיין פריסת אלבום לפרויקט זה.</p>
+      <p id="spreads-error" class="error-text" hidden></p>
+      <div id="spreads-list" class="spreads-list"></div>
+    </section>
+
     <!-- F10: מצב עיבוד per-stage, ניסיון חוזר, ומחיקת פרויקט -->
     <section class="card" id="status-section" hidden>
       <h2>מצב עיבוד</h2>
@@ -96,6 +118,33 @@
       <div class="row">
         <button id="delete-confirm-btn" class="btn btn-danger" disabled>מחיקה לצמיתות</button>
         <button id="delete-cancel-btn" class="btn btn-secondary">ביטול</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- F08: modal בחירת תמונה להחלפה - רק מתוך תמונות הפרויקט שלא הוחרגו. -->
+  <div id="photo-picker-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="photo-picker-title">
+      <h3 id="photo-picker-title">בחירת תמונה להחלפה</h3>
+      <p class="muted">ניתן לבחור רק תמונות מהפרויקט שלא הוחרגו ושעיבודן הושלם.</p>
+      <p id="photo-picker-error" class="error-text" hidden></p>
+      <div id="photo-picker-grid" class="photos-grid picker-grid"></div>
+      <div class="row">
+        <button id="photo-picker-cancel-btn" class="btn btn-secondary">ביטול</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- F08: modal שינוי תבנית - מציג את כל 6 התבניות, מנטרל (עם tooltip)
+       תבניות שמספר הסלוטים שלהן לא תואם למספר התמונות הנוכחי בכפולה. -->
+  <div id="template-picker-overlay" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="template-picker-title">
+      <h3 id="template-picker-title">שינוי תבנית לכפולה</h3>
+      <p class="muted">ניתן לבחור רק תבנית שמספר הסלוטים שלה תואם בדיוק למספר התמונות הנוכחי בכפולה.</p>
+      <p id="template-picker-error" class="error-text" hidden></p>
+      <div id="template-picker-grid" class="template-picker-grid"></div>
+      <div class="row">
+        <button id="template-picker-cancel-btn" class="btn btn-secondary">ביטול</button>
       </div>
     </div>
   </div>
