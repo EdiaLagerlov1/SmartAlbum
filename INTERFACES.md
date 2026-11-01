@@ -364,6 +364,94 @@ def change_template(spread_id: str, new_template_id: str,
 ```
 `orientation` ∈ `"landscape" | "portrait" | "any"`. `dominant: true` מסמן סלוט מרכזי (F07). frontend-rtl ו-export-agent קוראים את אותו ה-JSON.
 
+> **עדכון (layout-engine, issue #8 / F07)**: `generate_layout` מומש בפועל
+> ב-`layout_engine/api.py` (חתימה זהה למה שתועד מעל בסעיף הזה - אין שינוי:
+> `LayoutResult.status` הוא `Literal["ok", "error"]`). נוסף endpoint
+> ב-`main.py` שהוא **עטיפת HTTP דקה 1:1** מעל הפונקציה (לפי הכלל בסעיף 1):
+>
+> - `POST /api/projects/<project_id>/generate-layout` - שולף
+>   `selected_photo_ids` בעצמו ברמת ה-route (לפי ה-query המחייב בסעיף 4.2:
+>   `SELECT id FROM photos WHERE project_id=? AND selected_for_album=1 ORDER
+>   BY selection_order`) ומעביר ל-`generate_layout` - אין לוגיקת חלוקה/
+>   תבניות ב-route handler עצמו. מחזיר `{"project_id", "status",
+>   "spread_ids", "spread_count", "message"}`. **200 בכל המקרים** (גם
+>   `status="error"`) - אותה קונבנציה כמו `/run-selection`. 404 אם הפרויקט
+>   לא קיים.
+>
+> **קטלוג 6 התבניות שמומש** (`layout_engine/templates.json`, נטען פעם אחת
+> ל-`TEMPLATES: dict[id, template]`):
+> `single-feature-landscape` (1 סלוט, landscape, דומיננטי), `single-feature-
+> portrait` (1 סלוט, portrait, דומיננטי), `duo-landscape`/`duo-portrait` (2
+> סלוטים, אחד דומיננטי-גדול-יותר, השני קטן יותר - אסימטרי בכוונה כדי לבטא
+> "תמונה מרכזית" ויזואלית), `trio-mixed` (3 סלוטים: 1 גדול דומיננטי `"any"`
+> + 2 קטנים `"any"`), `grid-mixed` (4 סלוטים: 1 גדול דומיננטי `"any"` למעלה
+> + 3 קטנים `"any"` בשורה למטה). בכל תבנית יש **בדיוק סלוט דומיננטי אחד**.
+>
+> **אלגוריתם שמומש** (ראה גם docstring מפורט ב-`layout_engine/api.py`,
+> פונקציה-פונקציה):
+> 1. `check_must_limit` (ייבוא ישיר של `selection_engine.api`, קריאת-פונקציה
+>    בין מודולים לפי סעיף 1 - לא HTTP) כצעד ראשון, בדיוק כמו `run_selection`
+>    - `must_count > 60` -> `status="error"`, **לא נכתב כלום** (כלל-חסימת-
+>    היצירה המתועד בסעיף 4.2 חל גם על `generate_layout`, לא רק `run_selection`).
+> 2. **דה-דופ**: כל תמונה פעם אחת בכל האלבום כברירת מחדל (שומר את ההופעה
+>    *הראשונה* בסדר הכרונולוגי של הקלט, מוריד כפילויות אחרות); תמונה
+>    שה-`photo_id` שלה נמצא ב-`explicit_duplicates` (פרמטר `set[str]`
+>    אופציונלי) **לא** מצומצמת - כל הופעותיה נשמרות. זו המנגנון היחיד
+>    ל"המשתמשת הוסיפה תמונה שוב במפורש" (F07/F08) - לא ברירת מחדל של
+>    האלגוריתם. הגנת-עומק נוספת: אם שתי הופעות (של תמונת `explicit_duplicates`)
+>    נופלות בפועל לאותה כפולה אחרי החלוקה (שלב 3) - נשארת רק ההופעה
+>    הראשונה *בתוך אותה כפולה* (כי `spread_photos` יש לו `UNIQUE(spread_id,
+>    photo_id)` - תמונה לא יכולה להופיע פעמיים באותה כפולה בעצמה), אבל היא
+>    עדיין יכולה להופיע בכפולה אחרת.
+> 3. סך התמונות (אחרי דה-דופ) חייב להיות בתחום `15..60`
+>    (`MIN_SELECTED_FOR_LAYOUT`/`MAX_SELECTED_FOR_LAYOUT`, קבועים מתועדים ב-
+>    `layout_engine/api.py` - 15 כפולות כפול 1-4 תמונות לכפולה) - אחרת
+>    `status="error"` (אין status נפרד כמו `too_few_photos` ב-F06; ה-`message`
+>    מסביר את הסיבה בעברית, ה-literal נשאר `"ok"/"error"` לפי החתימה
+>    המתועדת מעלה), בלי לכתוב כלום.
+> 4. חלוקה ל-15 קבוצות **רציפות** (שומרות את סדר הקלט - כרונולוגי/
+>    `selection_order` - כך שהאלבום מספר סיפור לפי הסדר) - הכי שווה שאפשר
+>    (`n // 15` לכל קבוצה, העודף `n % 15` מתחלק לקבוצות ה*ראשונות*, בחירה
+>    שרירותית מתועדת, לא נרטיבית). עם `15 <= n <= 60` כל קבוצה היא 1..4
+>    תמונות - תואם בדיוק את קטלוג 6 התבניות.
+> 5. **תמונה דומיננטית/מרכזית לכל כפולה (F07)**: האיכות הגבוהה ביותר
+>    (`sharpness_score`/`exposure_score`, F04 - אותו `(sharpness, exposure)`
+>    key שב-F06, `NULL -> -1.0`, לא ציון מומצא) מבין תמונות הכפולה; שוויון
+>    נשבר לפי הסדר הכרונולוגי (ההופעה הראשונה בקבוצה) - "לא מנחש", נפילה
+>    דטרמיניסטית. התמונה הדומיננטית משובצת לסלוט ה-`dominant: true` בתבנית
+>    שנבחרה (שלב 6).
+> 6. **בחירת תבנית (F07, "התאמת תבנית לכיוון התמונות")**: לפי *כמות*
+>    התמונות בכפולה (`len(group)` -> `slot_count` תואם) ו*כיוון* (landscape
+>    אם `height <= width` או חסר מידע - "לא מנחש" portrait בלי עדות
+>    חד-משמעית מ-image-pipeline; portrait רק אם `height > width` בבירור):
+>    1 תמונה -> `single-feature-landscape`/`portrait` לפי כיוון אותה
+>    תמונה (שהיא אוטומטית גם הדומיננטית); 2 תמונות -> `duo-portrait` רק אם
+>    *שתיהן* portrait, אחרת `duo-landscape` (גם כש-מעורב 1+1 - ברירת מחדל
+>    מתועדת ל-landscape); 3 -> `trio-mixed` תמיד; 4 -> `grid-mixed` תמיד
+>    (שני אלה "any" בכל הסלוטים - אין תלות-כיוון). **אין כאן חיתוך/עיבוד
+>    פיקסלים** - אם לתמונה אין כיוון-תואם-מדויק לסלוט (למשל portrait יחיד
+>    בתוך `duo-landscape` מעורב) - ההתאמה-עם-שוליים (לא חיתוך) היא אחריות
+>    שכבת-התצוגה/export-agent (F09) שקוראת את `templates.json`, **לא**
+>    layout-engine - עקבי עם "אל תעבד פיקסלים" בהיקף המודול.
+> 7. **הרצה חוזרת מחליפה את הכפולות הקודמות של הפרויקט במלואה** - כל שורות
+>    `spreads`/`spread_photos` הקיימות לפרויקט נמחקות לפני כתיבת הכפולות
+>    החדשות (לא מצטרפות, בדיוק כמו `run_selection` ל-F06). **זה *לא* "יצירה
+>    מחדש" F08/סעיף 6** - אין כאן snapshot/אישור-UI/`spreads.version`
+>    מתקדם; `spreads.version` נשאר קבוע על `1` בכל הרצה כאן (incrementing
+>    הוא תחום F08, לא ממומש בהיקף הזה).
+>
+> `processing_jobs` (stage `'layout'`) מתעדכן (`running` -> `done` בהצלחה,
+> `running` -> `failed` עם `error_reason` = `"too_many_must"`/
+> `"too_few_selected_photos"`/`"too_many_selected_photos"` בחסימה) - אותה
+> תבנית בדיוק כמו `selection`/`tagging` מעלה.
+>
+> **לא ממומש כאן בכוונה, נשאר "חוזה מיועד" לעתיד (F08, issue #9)**:
+> `regenerate_layout`, `replace_photo_in_slot`, `change_template` - החתימות
+> המתועדות מעלה בסעיף 4.3 הן תכנון-מראש של ה-architect, לא קוד קיים. אלה
+> דורשות החלטה מפורשת על `spreads.version` (incrementing על "יצירה מחדש")
+> ועל חוזה ה-snapshot/undo (סעיף 6) - סוכן F08 יתאם עם ה-architect לפני
+> מימושן, לא "מומצאות" כאן.
+
 ### 4.4 layout-engine → (DB) → export-agent
 
 ```python

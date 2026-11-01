@@ -52,6 +52,16 @@ Endpoints (F06, issue #7 - עטיפת HTTP דקה מעל selection_engine.api.ru
                                               מחליט מה להציג לפי status, לא
                                               לפי HTTP status code).
 
+Endpoints (F07, issue #8 - עטיפת HTTP דקה מעל layout_engine.api.generate_layout,
+ראה INTERFACES.md סעיף 4.3):
+  POST  /api/projects/<project_id>/generate-layout - שולף את תמונות הפרויקט
+                                              עם selected_for_album=1 (ממוין
+                                              לפי selection_order - "רשימת
+                                              ה-photo_id הרשמית" לפי החוזה),
+                                              ובונה 15 כפולות + תבניות.
+                                              מחזיר status="ok"/"error" - 200
+                                              בכל המקרים (כמו run-selection).
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -72,6 +82,7 @@ from flask import Flask, g, jsonify, request, send_from_directory
 import db
 import storage
 from image_pipeline import api as image_pipeline
+from layout_engine import api as layout_engine
 from selection_engine import api as selection_engine
 
 # --- ולידציה בצד שרת (F01): רק JPEG, עד 20MB לקובץ -------------------------
@@ -591,6 +602,41 @@ def run_selection_route(project_id: str):
             "status": result.status,
             "selected_photo_ids": result.selected_photo_ids,
             "selected_count": len(result.selected_photo_ids),
+            "message": result.message,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F07 (issue #8): יצירת 15 כפולות. עטיפת HTTP דקה 1:1 מעל
+# layout_engine.api.generate_layout - אין לוגיקת חלוקה/תבניות כאן, ראה
+# INTERFACES.md סעיף 4.3. השליפה של selected_photo_ids (ה-query היחיד
+# המחייב לפי החוזה בין selection-engine ל-layout-engine, סעיף 4.2) נעשית
+# כאן ברמת ה-route - לא לוגיקת-בחירה, רק העברת הקלט התקני לפונקציה.
+# 200 בכל המקרים (גם status="error") - בדיוק כמו run-selection.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/generate-layout", methods=["POST"])
+def generate_layout_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    selected_rows = conn.execute(
+        """SELECT id FROM photos WHERE project_id = ? AND selected_for_album = 1
+           ORDER BY selection_order""",
+        (project_id,),
+    ).fetchall()
+    selected_photo_ids = [row["id"] for row in selected_rows]
+
+    result = layout_engine.generate_layout(project_id, selected_photo_ids, conn)
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "status": result.status,
+            "spread_ids": result.spread_ids,
+            "spread_count": len(result.spread_ids),
             "message": result.message,
         }
     )
