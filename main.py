@@ -62,6 +62,57 @@ Endpoints (F07, issue #8 - עטיפת HTTP דקה מעל layout_engine.api.gener
                                               מחזיר status="ok"/"error" - 200
                                               בכל המקרים (כמו run-selection).
 
+Endpoints (F08, issue #9 - עטיפות HTTP דקות מעל layout_engine.api /
+export_agent.api, ראה INTERFACES.md סעיף 4.3/4.4/6):
+  GET   /api/projects/<project_id>/spreads - רשימת 15 הכפולות הנוכחיות
+                                              (position/template_id/version +
+                                              שיבוץ תמונות per-slot, עם
+                                              thumbnail_url) - נוחות ל-UI,
+                                              לא חלק מהחוזה הפורמלי בין
+                                              המודולים (dump קריאה-בלבד של
+                                              spreads/spread_photos).
+  POST  /api/projects/<project_id>/spreads/<spread_id>/replace-photo -
+                                              עטיפה דקה 1:1 מעל
+                                              layout_engine.api.replace_photo_in_slot
+                                              (body: {"slot_index", "new_photo_id"}).
+                                              200 גם על כשל-ולידציה ("status":
+                                              "error") - אותה קונבנציה כמו
+                                              generate-layout; 404 רק אם
+                                              הפרויקט/הכפולה לא קיימים.
+  POST  /api/projects/<project_id>/spreads/<spread_id>/change-template -
+                                              עטיפה דקה 1:1 מעל
+                                              layout_engine.api.change_template
+                                              (body: {"new_template_id"}).
+                                              אותה קונבנציית 200/404.
+  POST  /api/projects/<project_id>/regenerate-layout - מממש את זרימת סעיף 6
+                                              ב-INTERFACES.md בצד השרת: קורא
+                                              **ראשית** ל-export_agent.
+                                              snapshot_structure (גיבוי
+                                              album_structure_prev.json),
+                                              ורק **אז** ל-layout_engine.
+                                              regenerate_layout. ה-modal
+                                              אישור המפורש (סעיף 6, שלב 1)
+                                              הוא אחריות ה-UI (frontend-rtl)
+                                              *לפני* שהוא קורא ל-endpoint הזה
+                                              - ה-endpoint עצמו לא מציג/אוכף
+                                              אישור שני, הוא "הביצוע בפועל"
+                                              בלבד (ראה הערה מפורטת מעל
+                                              ה-handler).
+  GET   /api/projects/<project_id>/structure-prev - קריאה (בלבד) של הגיבוי
+                                              האחרון שנכתב ע"י snapshot_structure
+                                              (album_structure_prev.json) - ל-UI
+                                              שמאפשר לצפות/להוריד אותו לצורך
+                                              "שחזור ידני" (סעיף 6, שלב 4: "אין
+                                              undo אוטומטי בגרסת הבסיס"). 404
+                                              אם אין עדיין snapshot לפרויקט.
+                                              **לא** endpoint-שחזור אוטומטי -
+                                              לא נכתב כזה בכוונה (ראה הערה
+                                              בהערות ה-handler).
+  GET   /api/templates - קטלוג 6 התבניות הקבועות (layout_engine/
+                                              templates.json) - נוחות ל-UI כדי
+                                              לבנות את תפריט "שינוי תבנית" בלי
+                                              לשכפל את ה-JSON בקוד ה-JS.
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -81,6 +132,7 @@ from flask import Flask, g, jsonify, request, send_from_directory
 
 import db
 import storage
+from export_agent import api as export_agent
 from image_pipeline import api as image_pipeline
 from layout_engine import api as layout_engine
 from selection_engine import api as selection_engine
@@ -133,6 +185,15 @@ def _get_project_or_404(conn, project_id: str):
 def _get_photo_or_404(conn, project_id: str, photo_id: str):
     return conn.execute(
         "SELECT * FROM photos WHERE project_id = ? AND id = ?", (project_id, photo_id)
+    ).fetchone()
+
+
+def _get_spread_or_404(conn, project_id: str, spread_id: str):
+    """F08 (issue #9): שולף כפולה *ומאמת שהיא שייכת לפרויקט הזה* (אותו דפוס
+    בדיוק כמו `_get_photo_or_404`) - כך ש-`spread_id` של פרויקט אחר לא "עובר"
+    דרך endpoint של פרויקט אחר (404, לא 200 בטעות)."""
+    return conn.execute(
+        "SELECT * FROM spreads WHERE project_id = ? AND id = ?", (project_id, spread_id)
     ).fetchone()
 
 
@@ -638,6 +699,236 @@ def generate_layout_route(project_id: str):
             "spread_ids": result.spread_ids,
             "spread_count": len(result.spread_ids),
             "message": result.message,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): רשימת 15 הכפולות הנוכחיות, עם שיבוץ התמונות per-slot.
+# קריאה-בלבד, נוחות ל-UI (לא חלק מהחוזה הפורמלי בין המודולים ב-INTERFACES.md
+# סעיף 4.3/4.4 - שם) - רק dump של spreads/spread_photos + הצטרפות ל-photos
+# כדי לקבל thumbnail_url/original_filename להצגה.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads", methods=["GET"])
+def list_spreads(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    spread_rows = conn.execute(
+        """SELECT id, position, template_id, version, updated_at
+           FROM spreads WHERE project_id = ? ORDER BY position""",
+        (project_id,),
+    ).fetchall()
+
+    spreads = []
+    for row in spread_rows:
+        template = layout_engine.TEMPLATES.get(row["template_id"]) or {}
+        photo_rows = conn.execute(
+            """SELECT sp.slot_index, sp.photo_id, sp.is_dominant,
+                      p.original_filename, p.thumb_path
+               FROM spread_photos sp JOIN photos p ON sp.photo_id = p.id
+               WHERE sp.spread_id = ? ORDER BY sp.slot_index""",
+            (row["id"],),
+        ).fetchall()
+        spreads.append(
+            {
+                "spread_id": row["id"],
+                "position": row["position"],
+                "template_id": row["template_id"],
+                "slot_count": template.get("slot_count"),
+                "version": row["version"],
+                "updated_at": row["updated_at"],
+                "photos": [
+                    {
+                        "slot_index": p["slot_index"],
+                        "photo_id": p["photo_id"],
+                        "is_dominant": bool(p["is_dominant"]),
+                        "original_filename": p["original_filename"],
+                        "thumbnail_url": (
+                            f"/api/projects/{project_id}/photos/{p['photo_id']}/thumbnail"
+                            if p["thumb_path"]
+                            else None
+                        ),
+                    }
+                    for p in photo_rows
+                ],
+            }
+        )
+
+    return jsonify({"project_id": project_id, "spreads": spreads})
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): החלפת תמונה בסלוט בודד בכפולה קיימת. עטיפת HTTP דקה 1:1
+# מעל layout_engine.api.replace_photo_in_slot - *אין* כאן ולידציית
+# "תמונה לא מוחרגת"/"שייכת לפרויקט" (זו אחריות layout-engine, ראה
+# INTERFACES.md סעיף 4.3) - רק המרת bool לתשובת JSON עם status/message,
+# אותה קונבנציה כמו generate-layout/run-selection (200 גם על status="error").
+# 404 רק אם הפרויקט או הכפולה (ב-project הזה) לא קיימים כלל.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads/<spread_id>/replace-photo", methods=["POST"])
+def replace_photo_in_spread_route(project_id: str, spread_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    spread = _get_spread_or_404(conn, project_id, spread_id)
+    if spread is None:
+        return _json_error(f"כפולה לא נמצאה: {spread_id}", 404, error_reason="spread_not_found")
+
+    payload = request.get_json(silent=True) or {}
+    if "slot_index" not in payload or not payload.get("new_photo_id"):
+        return _json_error("שדות 'slot_index' ו-'new_photo_id' הם שדות חובה בבקשה", 400)
+
+    try:
+        slot_index = int(payload["slot_index"])
+    except (TypeError, ValueError):
+        return _json_error("'slot_index' חייב להיות מספר שלם", 400)
+    new_photo_id = payload["new_photo_id"]
+
+    ok = layout_engine.replace_photo_in_slot(spread_id, slot_index, new_photo_id, conn)
+
+    return jsonify(
+        {
+            "spread_id": spread_id,
+            "slot_index": slot_index,
+            "new_photo_id": new_photo_id,
+            "status": "ok" if ok else "error",
+            "message": (
+                None
+                if ok
+                else "לא ניתן להחליף את התמונה בסלוט הזה - בדקו שהתמונה החדשה היא "
+                "מתוך תמונות הפרויקט הזה, שאינה מסומנת כ'החרגה', ושה-slot_index "
+                "קיים בתבנית הנוכחית של הכפולה"
+            ),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): שינוי תבנית לכפולה קיימת. עטיפת HTTP דקה 1:1 מעל
+# layout_engine.api.change_template - אין כאן לוגיקת reconciliation
+# (ממומשת ב-layout_engine, ראה INTERFACES.md סעיף 4.3) - רק המרת bool
+# לתשובת JSON, אותה קונבנציה כמו replace-photo מעלה.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads/<spread_id>/change-template", methods=["POST"])
+def change_template_route(project_id: str, spread_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    spread = _get_spread_or_404(conn, project_id, spread_id)
+    if spread is None:
+        return _json_error(f"כפולה לא נמצאה: {spread_id}", 404, error_reason="spread_not_found")
+
+    payload = request.get_json(silent=True) or {}
+    new_template_id = payload.get("new_template_id")
+    if not new_template_id:
+        return _json_error("שדה 'new_template_id' הוא שדה חובה בבקשה", 400)
+
+    ok = layout_engine.change_template(spread_id, new_template_id, conn)
+
+    return jsonify(
+        {
+            "spread_id": spread_id,
+            "new_template_id": new_template_id,
+            "status": "ok" if ok else "error",
+            "message": None if ok else f"תבנית לא קיימת בקטלוג התבניות: {new_template_id!r}",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): "יצירה מחדש" - מממש כאן, בצד השרת, את שלבים 2-3 של זרימת
+# סעיף 6 ב-INTERFACES.md: קודם export_agent.snapshot_structure (גיבוי המבנה
+# הנוכחי ל-album_structure_prev.json), *ורק אז* layout_engine.regenerate_layout
+# (שמוחק/כותב מחדש את כל 15 הכפולות ומקפיץ spreads.version). שני אלה
+# *בתוך אותו request handler* - לא שתי קריאות HTTP נפרדות - כך שאי אפשר
+# לקרוא ל-regenerate_layout "בלי" snapshot דרך ה-API הזה (סדר קבוע בקוד).
+#
+# **ה-modal אישור מפורש (סעיף 6, שלב 1) הוא אחריות frontend-rtl בצד
+# הלקוח, *לפני* הקריאה ל-endpoint הזה** - ה-endpoint לא מציג/שומר "אישור"
+# משלו ולא חוסם קריאה כפולה (אין state נוסף) - בדיוק כמו ש-`regenerate_layout`
+# עצמו לא אוכף snapshot קודם (ראה docstring ב-layout_engine/api.py). זו
+# החלטת-תכנון מכוונת, עקבית עם מה שה-layout-engine agent כתב ב-commit
+# הקודם על אותו branch (לא state/lock חדש ב-DB).
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/regenerate-layout", methods=["POST"])
+def regenerate_layout_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    snapshot_path = export_agent.snapshot_structure(project_id, conn)
+
+    result = layout_engine.regenerate_layout(project_id, conn)
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "status": result.status,
+            "spread_ids": result.spread_ids,
+            "spread_count": len(result.spread_ids),
+            "message": result.message,
+            "snapshot_path": snapshot_path,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): קריאה (בלבד) של הגיבוי האחרון (album_structure_prev.json) -
+# "השחזור ידני מתוך album_structure_prev.json" (סעיף 6, שלב 4: "אין undo
+# אוטומטי בגרסת הבסיס"). ה-endpoint הזה *לא* מבצע שחזור אוטומטי לתוך ה-DB -
+# הוא רק חושף את תוכן הקובץ ל-UI (לצפייה/הורדה), כדי שאדם יוכל לשחזר ידנית
+# אם צריך. אין כאן endpoint נפרד ל"שחזור" בכוונה - לא התבקש ב-issue, ותוספת
+# כזו הייתה "undo אוטומטי" שהחוזה המתועד שולל במפורש.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/structure-prev", methods=["GET"])
+def get_structure_prev(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    path = storage.export_structure_prev_path(project_id)
+    if not path.is_file():
+        return _json_error(
+            "אין עדיין גיבוי שמור לפרויקט זה (snapshot נכתב רק לפני פעולת 'יצירה מחדש')",
+            404,
+            error_reason="no_snapshot",
+        )
+
+    try:
+        structure = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _json_error("שגיאה בקריאת קובץ הגיבוי", 500)
+
+    return jsonify(structure)
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): קטלוג 6 התבניות הקבועות (layout_engine/templates.json) -
+# נוחות ל-UI כדי לבנות את תפריט "שינוי תבנית" בלי לשכפל את ה-JSON בקוד
+# ה-JS (אותו קובץ מקור יחיד, לפי INTERFACES.md סעיף 4.3: "frontend-rtl
+# ו-export-agent קוראים את אותו ה-JSON").
+# ---------------------------------------------------------------------------
+@app.route("/api/templates", methods=["GET"])
+def list_templates():
+    return jsonify(
+        {
+            "templates": [
+                {
+                    "id": tpl["id"],
+                    "slot_count": tpl["slot_count"],
+                    "slots": tpl["slots"],
+                }
+                for tpl in layout_engine.TEMPLATES.values()
+            ]
         }
     )
 
