@@ -452,6 +452,111 @@ def change_template(spread_id: str, new_template_id: str,
 > ועל חוזה ה-snapshot/undo (סעיף 6) - סוכן F08 יתאם עם ה-architect לפני
 > מימושן, לא "מומצאות" כאן.
 
+> **עדכון (layout-engine, issue #9 / F08)**: `regenerate_layout`,
+> `replace_photo_in_slot`, `change_template` מומשו בפועל ב-`layout_engine/
+> api.py` (חתימות זהות למה שתועד מעל בסעיף הזה - אין שינוי). וכן
+> `export_agent.snapshot_structure` מומשה ב-`export_agent/api.py` (חדש -
+> ראה סעיף 4.4 מעלה; `export_agent.export_album`/F09 **לא** ממומשת, נשארת
+> "חוזה מיועד" לעתיד, issue #10). **לא נוסף שום endpoint ב-`main.py` ב-commit
+> הזה** - החיווט ל-HTTP/UI (כולל ה-modal אישור בסעיף 6) הוא commit נפרד,
+> `frontend-rtl`, על אותו branch.
+>
+> - `regenerate_layout(project_id, db, **kwargs)` - משתף לוגיקה עם
+>   `generate_layout` דרך פונקציית-core פרטית משותפת (`_run_layout_algorithm`)
+>   כדי לא לשכפל את האלגוריתם (דה-דופ, חלוקה ל-15 קבוצות, דומיננטיות, בחירת
+>   תבנית - ראה סעיף 4.3 מעלה, "האלגוריתם שמומש"). שני הבדלים בלבד מ-
+>   `generate_layout`:
+>   1. **שולפת `selected_photo_ids` בעצמה מה-DB** (אותה שאילתה מחייבת:
+>      `SELECT id FROM photos WHERE project_id=? AND selected_for_album=1
+>      ORDER BY selection_order`) - לא מקבלת אותה כפרמטר, כי זו הכניסה
+>      היחידה ל"יצירה מחדש" לפי החתימה המתועדת (`**kwargs`, בלי
+>      `selected_photo_ids` שמי).
+>   2. **מקפיצה את `spreads.version`**: `max(version קיים לפרויקט) + 1`
+>      (נקבע *לפני* המחיקה/כתיבה - `0` אם אין spreads קודמות, כך שההרצה
+>      הראשונה דרך `regenerate_layout` בלי `generate_layout` קודמת מקבלת
+>      `version=1`, תואם סמנטית). **כל 15 הכפולות של הרצת regenerate בודדת
+>      מקבלות אותה גרסה** - `version` הוא "גרסת-פריסה כוללת" per רצת-regenerate,
+>      לא מונה per-spread עצמאי - קריאה-ישירה של `schema.sql`
+>      ("version מקדם כל 'יצירה מחדש'") קבעה את הפרשנות הזו, כפי שה-issue
+>      הנחה לבדוק. `**kwargs` תומך בפועל רק בפרמטר אופציונלי אחד:
+>      `explicit_duplicates` (אותה סמנטיקה כמו `generate_layout`).
+>      **האכיפה של "snapshot לפני regenerate" (סעיף 6) היא אחריות ה-caller
+>      בלבד** - אין state/lock ב-DB שמונע קריאה ל-`regenerate_layout` בלי
+>      snapshot קודם; זו החלטת-תכנון מכוונת (אין עמודה/טבלה חדשה ל"האם
+>      אושר/snapshot בוצע" - לא התבקשה ב-issue, ותוספת כזו הייתה חורגת
+>      מה"חוזה המלא" המתועד בסעיף 6 בלי אישור architect).
+>
+> - `replace_photo_in_slot(spread_id, slot_index, new_photo_id, db) -> bool`
+>   - **קונבנציית הדיווח על כשל שנבחרה (הוחלט כאן, לא היה מפורש ב-issue)**:
+>     תואמת בדיוק את הדפוס הקיים ב-`selection_engine.api.set_flag` - `bool`
+>     (`True`=הצליח, `False`=כשל-ולידציה "נורמלי"/צפוי), **בלי** exception,
+>     כי חתימת ה-`-> bool` המתועדת כאן אין בה ערוץ-שגיאה נפרד (לא dataclass
+>     עם status/message כמו ב-`LayoutResult`). `False` על: `spread_id` לא
+>     קיים; `slot_index` לא קיים בתבנית הנוכחית של הכפולה; `new_photo_id`
+>     לא קיים/שייך לפרויקט אחר; `new_photo_id` הוא `flag='exclude'`;
+>     `new_photo_id` כבר משובץ לסלוט *אחר* באותה כפולה (היה שובר
+>     `UNIQUE(spread_id, photo_id)` ב-schema.sql - לא ממומש כ"swap" בין שני
+>     סלוטים, מחוץ להיקף ה-issue).
+>   - **אין דה-דופ גלובלי לכל האלבום בכוונה**: הקריאה לפונקציה הזו *היא*
+>     "פעולת ה-UI הנפרדת" שה-issue מתאר כ"המשתמשת הוסיפה אותה שוב במפורש"
+>     (כלל 4 בתיאור ה-issue) - לכן לא חוסמים תמונה שכבר מופיעה בכפולה
+>     *אחרת* באלבום, רק באותה כפולה עצמה (constraint ה-DB).
+>   - התמונה שמשובצת לסלוט מקבלת `is_dominant` **לפי הסלוט בתבנית** (אם
+>     `slot_index` הוא הסלוט ה-`dominant: true` - `1`, אחרת `0`) - **לא**
+>     recompute של "איזו תמונה הכי טובה" (זו פעולת UI ידנית, לא אלגוריתם
+>     איכות). מעדכן `spreads.updated_at`, לא `spreads.version`.
+>
+> - `change_template(spread_id, new_template_id, db) -> bool` - `False` אם
+>   `new_template_id` לא קיים ב-`TEMPLATES` או `spread_id` לא קיים (אותה
+>   קונבנציית-bool). **כלל ה-reconciliation שהוחלט (מתועד כאן כי ה-issue
+>   השאיר "להתאים בצורה סבירה" בלי לקבוע מדויק)**, עקבי עם ההיגיון הקיים
+>   של `_assign_slots`/`_pick_dominant` ב-F07 ("דומיננטי תמיד ראשון"):
+>   1. התמונה שהייתה דומיננטית בכפולה (אם הייתה) ממוקמת ראשונה ברשימה
+>      מסודרת; שאר התמונות הקיימות אחריה, לפי `slot_index` הישן שלהן.
+>   2. אם לתבנית החדשה **פחות** סלוטים ממספר התמונות המשובצות - התמונות
+>      העודפות (מסוף הרשימה הממוינת - הדומיננטית הקודמת, אם הייתה, שומרת
+>      על מקומה הראשון ולכן לעולם לא "עודפת") **נשמטות מהכפולה הזו בלבד**
+>      (נמחקת שורת `spread_photos`, לא נמחקת התמונה מהפרויקט - אפשר לשבץ
+>      אותה בכפולה אחרת ידנית אחר-כך דרך `replace_photo_in_slot`).
+>   3. אם לתבנית החדשה **יותר** סלוטים ממספר התמונות המשובצות - הסלוטים
+>      הנוספים (הלא-דומיננטיים) **נשארים ריקים** (אין שורת `spread_photos`)
+>      - אין תמונה "להמציא" אוטומטית; המשתמשת משלימה ידנית. ממומש בפונקציית
+>      עזר נפרדת `_assign_slots_partial` (סובלת `len(group) < slot_count`,
+>      בשונה מ-`_assign_slots` המקורית של F07 שמניחה תמיד התאמה מדויקת -
+>      נכון רק ל-`generate_layout`/`regenerate_layout` שבונות את הקבוצה
+>      במידה המדויקת מראש).
+>   4. התמונה ה"ראשונה" (הדומיננטית הקודמת, אם הייתה - אחרת זו שהייתה
+>      ב-slot_index 0 הישן) משובצת לסלוט ה-`dominant: true` של התבנית
+>      החדשה - "התמונה הדומיננטית נשארת דומיננטית אם אפשר", כנדרש ב-issue.
+>   5. **לא מקפיצה `spreads.version`** - שינוי תבנית הוא עריכה-ידנית בודדת
+>      על כפולה *אחת*, לא "יצירה מחדש" של 15 הכפולות (`version` מקופץ רק
+>      ב-`regenerate_layout`, לפי הניסוח המדויק ב-`schema.sql`: "version
+>      מקדם כל 'יצירה מחדש'" - נקודה שה-issue ביקש לאשר במפורש מתוך קריאת
+>      `schema.sql`, לא ניחוש). מעדכן `spreads.updated_at` (עקבי עם ההערה
+>      על העמודה הזו ב-`schema.sql`: "לכל עדכון - יצירה/swap/שינוי תבנית").
+>
+> **`export_agent/api.py` (מודול חדש, תת-קבוצה מכוונת)**:
+> `snapshot_structure(project_id, db) -> str` מומשה כתלות-קדימה הכרחית של
+> F08 (סעיף 6: "frontend-rtl קורא ל-snapshot_structure, רק אז ל-
+> regenerate_layout") - **זו הפונקציה היחידה שממומשת ב-`export_agent`
+> בהיקף הזה**. כותבת dump JSON טהור של `spreads`/`spread_photos` הנוכחיים
+> (position/template_id/version/updated_at + רשימת photos per spread עם
+> slot_index/photo_id/is_dominant) לנתיב `storage.export_structure_prev_path
+> (project_id)` (עמודה/פונקציה שכבר הייתה מתועדת/קיימת ב-`storage.py` -
+> לא נוסף שדה חדש), ומחזירה את הנתיב כ-`str`. **ללא תלות ב-WeasyPrint/
+> רינדור HTML בכלל** - `export_album`/`ExportResult` (F09, issue #10,
+> עדיין חסום) **לא** ממומשים כאן ולא נגענו בהם - אין פונקציית
+> `export_album` כלל במודול בהיקף הזה (לא stub חלקי, לפי ההנחיה המפורשת
+> שלא "לממש-חצי"). פורמט ה-JSON לא מתועד כחוזה-API מחייב מעבר למה שסעיף 6
+> כבר קובע ("השחזור ידני מתוך album_structure_prev.json") - אין קוד
+> אוטומטי שמפענח את הקובץ חזרה ל-DB בהיקף הזה (restore הוא ידני, כמו
+> שסעיף 6 כבר קבע, לא "undo אוטומטי").
+>
+> `processing_jobs` (stage `'layout'`) מתעדכן ב-`regenerate_layout` **באותה
+> תבנית בדיוק** כמו `generate_layout` (משתפות את `_run_layout_algorithm`) -
+> `replace_photo_in_slot`/`change_template` **לא** נוגעות ב-`processing_jobs`
+> בכלל (עריכות-ידניות בודדות על כפולה אחת, לא "הרצת שלב pipeline" מחדש).
+
 ### 4.4 layout-engine → (DB) → export-agent
 
 ```python
