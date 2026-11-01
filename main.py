@@ -62,6 +62,29 @@ Endpoints (F07, issue #8 - עטיפת HTTP דקה מעל layout_engine.api.gener
                                               מחזיר status="ok"/"error" - 200
                                               בכל המקרים (כמו run-selection).
 
+Endpoints (F08, issue #9 - עטיפת HTTP דקה מעל layout_engine.api.replace_photo_in_slot/
+change_template/get_spreads, ראה INTERFACES.md סעיף 4.3 - "מודל save/restore":
+אין draft נפרד, כל קריאה כאן כותבת/מחזירה ישירות מ-SQLite):
+  GET   /api/projects/<project_id>/spreads        - מצב הכפולות הנוכחי
+                                              (כולל thumbnail_url/width/height
+                                              לכל תמונה) - לרינדור ה-UI וגם
+                                              ל"שחזור" אחרי פתיחה מחדש.
+  POST  /api/projects/<project_id>/spreads/<spread_id>/replace-photo -
+                                              body: {"old_photo_id", "new_photo_id",
+                                              "allow_duplicate": false}.
+                                              מחזיר status="ok"/"error" - 200
+                                              בכל המקרים (עקבי עם run-selection/
+                                              generate-layout), 404 אם הפרויקט
+                                              לא קיים.
+  POST  /api/projects/<project_id>/spreads/<spread_id>/change-template -
+                                              body: {"template_id"}. מחזיר
+                                              status="ok"/"error" - 200 בכל
+                                              המקרים, 404 אם הפרויקט לא קיים.
+  GET   /api/templates                     - קטלוג 6 התבניות הקבוע
+                                              (templates.json) - נוחות ל-UI
+                                              לבניית בורר-תבניות, בלי לשכפל
+                                              את הקובץ בצד frontend.
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -134,6 +157,38 @@ def _get_photo_or_404(conn, project_id: str, photo_id: str):
     return conn.execute(
         "SELECT * FROM photos WHERE project_id = ? AND id = ?", (project_id, photo_id)
     ).fetchone()
+
+
+def _get_spread_or_404(conn, project_id: str, spread_id: str):
+    return conn.execute(
+        "SELECT id FROM spreads WHERE project_id = ? AND id = ?", (project_id, spread_id)
+    ).fetchone()
+
+
+def _thumbnail_urls_for_photos(conn, project_id: str, photo_ids: list[str]) -> dict[str, dict]:
+    """שולף thumb_path/width/height לכל photo_id רלוונטי בשאילתה אחת (לא
+    per-photo) ובונה thumbnail_url - אותה קונבנציה כמו list_photos (F01)."""
+    distinct_ids = list(dict.fromkeys(photo_ids))
+    if not distinct_ids:
+        return {}
+    placeholders = ",".join("?" for _ in distinct_ids)
+    rows = conn.execute(
+        f"""SELECT id, thumb_path, width, height FROM photos
+            WHERE project_id = ? AND id IN ({placeholders})""",
+        (project_id, *distinct_ids),
+    ).fetchall()
+    return {
+        row["id"]: {
+            "width": row["width"],
+            "height": row["height"],
+            "thumbnail_url": (
+                f"/api/projects/{project_id}/photos/{row['id']}/thumbnail"
+                if row["thumb_path"]
+                else None
+            ),
+        }
+        for row in rows
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +695,114 @@ def generate_layout_route(project_id: str):
             "message": result.message,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): GET /spreads - מצב הכפולות הנוכחי. עטיפת HTTP דקה מעל
+# layout_engine.api.get_spreads + בניית thumbnail_url/width/height per photo
+# (אותה קונבנציה כמו list_photos, F01) - אין לוגיקת grid/תבנית כאן, ראה
+# INTERFACES.md סעיף 4.3. זה גם ה-endpoint ש"שחזור" (reload) נשען עליו -
+# קורא תמיד את המצב המעודכן מ-SQLite, בלי cache בזיכרון.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads", methods=["GET"])
+def get_spreads_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    spreads = layout_engine.get_spreads(project_id, conn)
+
+    all_photo_ids = [p["photo_id"] for spread in spreads for p in spread["photos"]]
+    photo_info = _thumbnail_urls_for_photos(conn, project_id, all_photo_ids)
+
+    for spread in spreads:
+        for p in spread["photos"]:
+            info = photo_info.get(p["photo_id"], {})
+            p["thumbnail_url"] = info.get("thumbnail_url")
+            p["width"] = info.get("width")
+            p["height"] = info.get("height")
+
+    return jsonify({"project_id": project_id, "spreads": spreads, "spread_count": len(spreads)})
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): POST /spreads/<spread_id>/replace-photo - עטיפת HTTP דקה
+# 1:1 מעל layout_engine.api.replace_photo_in_slot. 404 אם הפרויקט לא קיים;
+# שגיאות "צפויות" (spread/photo לא נמצא, exclude, כפילות) מוחזרות
+# כ-status="error" עם 200 (אין קלט שגוי מצד ה-UI, רק תוצאת-אלגוריתם
+# לא-תקינה) - עקבי עם run-selection/generate-layout; 400 רק אם שדות החובה
+# בגוף הבקשה חסרים (קלט פגום מבחינת HTTP, לא מבחינת האלגוריתם).
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads/<spread_id>/replace-photo", methods=["POST"])
+def replace_photo_in_slot_route(project_id: str, spread_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    payload = request.get_json(silent=True) or {}
+    old_photo_id = payload.get("old_photo_id")
+    new_photo_id = payload.get("new_photo_id")
+    if not old_photo_id or not new_photo_id:
+        return _json_error("שדות 'old_photo_id' ו-'new_photo_id' הם שדות חובה בבקשה", 400)
+
+    allow_duplicate = bool(payload.get("allow_duplicate", False))
+
+    result = layout_engine.replace_photo_in_slot(
+        project_id, spread_id, old_photo_id, new_photo_id, conn, allow_duplicate=allow_duplicate
+    )
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "spread_id": result.spread_id,
+            "status": result.status,
+            "error_reason": result.error_reason,
+            "message": result.message,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): POST /spreads/<spread_id>/change-template - עטיפת HTTP
+# דקה 1:1 מעל layout_engine.api.change_template. ראה הערות ל-replace-photo
+# מעל לגבי status="error" מול 400/404.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/spreads/<spread_id>/change-template", methods=["POST"])
+def change_template_route(project_id: str, spread_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    payload = request.get_json(silent=True) or {}
+    template_id = payload.get("template_id")
+    if not template_id:
+        return _json_error("שדה 'template_id' הוא שדה חובה בבקשה", 400)
+
+    result = layout_engine.change_template(project_id, spread_id, template_id, conn)
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "spread_id": result.spread_id,
+            "status": result.status,
+            "error_reason": result.error_reason,
+            "message": result.message,
+            "template_id": result.template_id,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F08 (issue #9): GET /api/templates - קטלוג 6 התבניות הקבוע (templates.json),
+# נוחות ל-UI (בורר תבניות) - בלי לוגיקה, רק עטיפה דקה מעל layout_engine.TEMPLATES
+# (שכבר נטען פעם אחת מה-JSON ב-import, ראה layout_engine/api.py).
+# ---------------------------------------------------------------------------
+@app.route("/api/templates", methods=["GET"])
+def list_templates_route():
+    return jsonify({"templates": list(layout_engine.TEMPLATES.values())})
 
 
 # ---------------------------------------------------------------------------

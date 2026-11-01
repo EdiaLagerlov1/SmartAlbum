@@ -445,12 +445,155 @@ def change_template(spread_id: str, new_template_id: str,
 > `"too_few_selected_photos"`/`"too_many_selected_photos"` בחסימה) - אותה
 > תבנית בדיוק כמו `selection`/`tagging` מעלה.
 >
-> **לא ממומש כאן בכוונה, נשאר "חוזה מיועד" לעתיד (F08, issue #9)**:
-> `regenerate_layout`, `replace_photo_in_slot`, `change_template` - החתימות
-> המתועדות מעלה בסעיף 4.3 הן תכנון-מראש של ה-architect, לא קוד קיים. אלה
-> דורשות החלטה מפורשת על `spreads.version` (incrementing על "יצירה מחדש")
-> ועל חוזה ה-snapshot/undo (סעיף 6) - סוכן F08 יתאם עם ה-architect לפני
-> מימושן, לא "מומצאות" כאן.
+> **עדכון (layout-engine, issue #9 / F08 - "החלפת תמונות ושינוי תבנית",
+> חלק ה-backend): `replace_photo_in_slot`/`change_template`/`get_spreads`
+> מומשו בפועל ב-`layout_engine/api.py`.** לא היה architect זמין לתאם איתו
+> לפני המימוש הזה (כמו שהיה המצב גם ב-issue #5/#8 הקודמים, ראה הערות
+> architect בסעיף 1) - לכן הסוכן שמימש את ה-issue הזה קיבל את ההחלטות
+> הבאות **בפועל**, ותיעד אותן כאן (לא "ניחוש" חד-צדדי בלי תיעוד):
+>
+> **שינוי חתימה מהשרטוט המקורי בסעיף הזה** (השרטוט המקורי מעלה -
+> `replace_photo_in_slot(spread_id, slot_index, new_photo_id, db) -> bool`
+> / `change_template(spread_id, new_template_id, db) -> bool` - **הוחלף**
+> בחתימות הבאות, לפי דרישת ה-issue במפורש:
+> ```python
+> @dataclass
+> class ReplacePhotoResult:
+>     status: Literal["ok", "error"]
+>     error_reason: str | None   # קוד-שגיאה יציב למכונה, None אם ok
+>     message: str | None        # הודעה בעברית (גם בהצלחה - למשל no-op)
+>     spread_id: str | None
+>
+> def replace_photo_in_slot(
+>     project_id: str, spread_id: str, old_photo_id: str, new_photo_id: str,
+>     db: sqlite3.Connection, *, allow_duplicate: bool = False,
+> ) -> ReplacePhotoResult: ...
+>
+> @dataclass
+> class ChangeTemplateResult:
+>     status: Literal["ok", "error"]
+>     error_reason: str | None
+>     message: str | None
+>     spread_id: str | None
+>     template_id: str | None    # התבנית בפועל אחרי הקריאה (ישנה אם error)
+>
+> def change_template(
+>     project_id: str, spread_id: str, new_template_id: str, db: sqlite3.Connection,
+> ) -> ChangeTemplateResult: ...
+>
+> def get_spreads(project_id: str, db: sqlite3.Connection) -> list[dict]: ...
+> ```
+> **הנמקה לשינוי**: (1) `project_id` נוסף לשתי הפונקציות הראשונות כדי
+> לאכוף סקופ-פרויקט בתוך הפונקציה עצמה (לא רק ברמת ה-route) - `spread_id`/
+> `old_photo_id`/`new_photo_id` חייבים להשתייך לאותו פרויקט, אחרת יש סיכון
+> ל"זליגה" בין פרויקטים (למשל תמונה מפרויקט אחר). (2) `old_photo_id` הוחלף
+> ב-`slot_index` כי ה-UI (לפי האפיון) מציג תמונה וה"החלפה" מתבצעת דרך
+> *התמונה* הנוכחית שרואים ("החלף את התמונה הזו"), לא דרך אינדקס גיאומטרי
+> פנימי שה-UI לא בהכרח יודע/צריך לדעת; `slot_index` עדיין קיים כמבנה
+> הפנימי (`spread_photos.slot_index`) ונשמר ללא שינוי בתוך הפונקציה. (3)
+> `bool` הוחלף ב-dataclass עם `status`/`error_reason`/`message` - עקבי עם
+> כל שאר הפונקציות המתועדות בסעיף 4 (`LayoutResult`, `SelectionResult`,
+> `MustCountCheck`...) שמחזירות תוצאה מפורטת JSON-serializable, לא `bool`
+> יחיד שלא מסביר *למה* נכשל (ה-UI חייב הודעת שגיאה ברורה לכמה תרחישי כשל
+> שונים - exclude/לא-בפרויקט/כבר-באלבום/אי-התאמת-סלוטים).
+>
+> **מודל save/restore שנבחר (ללא שכבת draft נפרדת)**: כמו `generate_layout`
+> הקיים - כל קריאה מצליחה ל-`replace_photo_in_slot`/`change_template`
+> כותבת ל-`spreads`/`spread_photos` ומריצה `db.commit()` **באופן מיידי**,
+> בתוך הקריאה עצמה. אין טבלת "draft"/מצב-זיכרון-בתהליך נפרד. פירוש הדבר:
+> "שמירה מפורשת" (לפי לשון ה-issue) **היא** עצם הקריאה לפונקציה - אין
+> endpoint "save" נוסף; "פתיחה מחדש משחזרת את הגרסה האחרונה" מתקיימת
+> אוטומטית כי `get_spreads`/`GET /api/projects/<id>/spreads` קוראים תמיד
+> ישירות מ-SQLite (נבדק בטסטים דרך חיבור DB חדש/עצמאי - "מדמה פתיחה מחדש").
+> נבחר המודל הפשוט הזה (ולא שכבת draft) כי: (א) `schema.sql` לא מגדיר טבלת
+> draft-sibling ל-`spreads`/`spread_photos`, והוספת טבלה כזו היא שינוי-סכמה
+> שדורש תיאום-ארכיטקט אמיתי - לא "להמציא" כאן בלי תיאום; (ב) ההתנהגות
+> הקיימת של `generate_layout` **כבר** כותבת ישירות (commit מיידי) - קו
+> עקביות פשוט יותר מלהוסיף משהו אסימטרי רק לשתי הפונקציות החדשות. **אם
+> בעתיד תתגלה דרישה אמיתית ל"בטל שינוי לפני שמירה" (undo בתוך session לפני
+> commit)** - זה שינוי-מודל שדורש טבלת draft/עמודת-staging חדשה ועובר דרך
+> ה-architect לפני מימוש, לא מומש כאן.
+>
+> **`spreads.version`**: מקודם ב-**+1** בכל קריאה מצליחה (לא no-op) ל-
+> `replace_photo_in_slot` או `change_template` על אותה כפולה - **לא** רק
+> ב"יצירה מחדש" המלאה של סעיף 6 (זו קביעה מפורשת של הסוכן הזה, בהיעדר
+> architect). `version` **אינו** משמש בפועל למימוש undo/redo (זה נשאר
+> מחוץ להיקף ה-issue, כנאמר בו במפורש) - הוא רק מונה-עדכונים גלוי ב-API
+> (`GET /spreads`), לדוגמה ל-optimistic-concurrency עתידי ב-UI ("המצב
+> השתנה מאז הטעינה האחרונה - לרענן?") - לא ממומש כרגע מעבר לחשיפת הערך.
+> `generate_layout` (F07) ממשיך לאפס אותו ל-`1` בכל הרצה-מחדש-מלאה, כמקודם.
+>
+> **דה-דופ (`replace_photo_in_slot` מול F07)**: כברירת מחדל (`allow_duplicate=
+> False`) **נדחה** swap שהתמונה החדשה כבר משובצת בכפולה *אחרת* באלבום -
+> ממשיך את כלל-הדה-דופ של F07 ("כל תמונה פעם אחת כברירת מחדל"). הקורא יכול
+> להעביר `allow_duplicate=True` במפורש כדי לאפשר זאת - אנלוגי ל-
+> `explicit_duplicates` של `generate_layout` ("המשתמשת הוסיפה תמונה שוב
+> במפורש" הוא **תמיד** פרמטר מפורש מהקורא, לא התנהגות-ברירת-מחדל של
+> האלגוריתם, לפי ה-issue: "לא ברירת מחדל של האלגוריתם"). תמונה שכבר
+> באותה כפולה (בסלוט אחר) **נדחית תמיד**, גם עם `allow_duplicate=True` -
+> `spread_photos` יש לו `UNIQUE(spread_id, photo_id)`, ואין משמעות ל"אותה
+> תמונה פעמיים באותה כפולה".
+>
+> **תבנית אחרי swap**: `replace_photo_in_slot` **לא** מחשבת מחדש תבנית/
+> דומיננטיות - התמונה החדשה נכנסת לאותו `slot_index` (ואותו `is_dominant`)
+> שבו הייתה התמונה הישנה, בלי קשר לכיוון (landscape/portrait) שלה. אם
+> כיוון התמונה החדשה לא מתאים לסלוט - זו בחירה מודעת: שינוי תבנית הוא
+> פעולה **נפרדת ומפורשת** (`change_template`), לא תוצאת-לוואי אוטומטית
+> של swap (כדי לא "להפתיע" את המשתמשת בשינוי פריסה שלא ביקשה).
+>
+> **ולידציית `change_template`**: `new_template_id` חייב להיות קיים ב-
+> `TEMPLATES` (`templates.json`) **וגם** `slot_count` שלו חייב להיות **שווה
+> בדיוק** למספר התמונות הקיימות בכפולה - גם פחות סלוטים (היה "מאבד" תמונות
+> בשקט) וגם יותר סלוטים (סלוט ריק בלי תמונה) נדחים עם `error_reason=
+> "slot_count_mismatch"`, לא דילול/מחיקה שקטה (לפי דרישת ה-issue: "להחליט
+> כלל סביר כדי לא לאבד תמונות בשקט"). בהצלחה: התמונה שהייתה דומיננטית
+> נשארת דומיננטית (משובצת לסלוט ה-`dominant: true` של התבנית החדשה), שאר
+> התמונות משובצות לשאר הסלוטים לפי סדר `slot_index` הקיים - אותה פונקציית-
+> עזר פנימית (`_assign_slots`) כמו ב-`generate_layout`, בלי לחשב מחדש
+> כיוון/איכות (זו בחירה *מפורשת* של המשתמשת, לא ניחוש-אלגוריתם חדש).
+>
+> **`get_spreads(project_id, db) -> list[dict]`**: קריאה (read-only), לא
+> dataclass (עקבי עם סעיף 1 - "JSON-serializable dict"), ממוינת לפי
+> `position`: `{"spread_id", "position", "template_id", "version",
+> "updated_at", "photos": [{"slot_index", "photo_id", "is_dominant"}, ...]}`.
+> **לא** בונה `thumbnail_url`/`width`/`height` - זו אחריות שכבת-ה-HTTP
+> (`main.py`, אותה קונבנציה כמו `list_photos` ב-F01), לא `layout_engine`.
+>
+> **Endpoints שנוספו ב-`main.py`** (עטיפת HTTP דקה 1:1 לפי הכלל בסעיף 1):
+>
+> - `GET /api/projects/<project_id>/spreads` - עטיפה מעל `get_spreads`,
+>   מוסיפה `thumbnail_url`/`width`/`height` לכל תמונה (כמו `list_photos`).
+>   מחזיר `{"project_id", "spreads": [...], "spread_count"}`. 404 אם
+>   הפרויקט לא קיים. **זה גם ה-endpoint ש"שחזור"/"פתיחה מחדש" נשען עליו** -
+>   קורא תמיד את המצב המעודכן מ-SQLite.
+> - `POST /api/projects/<project_id>/spreads/<spread_id>/replace-photo` -
+>   body: `{"old_photo_id": str, "new_photo_id": str, "allow_duplicate":
+>   bool (אופציונלי, false כברירת מחדל)}`. מחזיר `{"project_id",
+>   "spread_id", "status", "error_reason", "message"}`. **200 בכל התוצאות
+>   הצפויות** של `replace_photo_in_slot` (גם `status="error"`, למשל
+>   `new_photo_excluded`) - עקבי עם `/run-selection`/`/generate-layout`.
+>   `400` רק אם `old_photo_id`/`new_photo_id` חסרים בגוף הבקשה (קלט פגום
+>   מבחינת HTTP, לא כשל-אלגוריתם). `404` אם הפרויקט לא קיים (`spread_id`/
+>   `old_photo_id`/`new_photo_id` לא-תקינים הם `status="error"`, לא 404 -
+>   הם "תוצאה תקינה של בדיקת ולידציה", לא "לא נמצא" ב-HTTP semantics).
+> - `POST /api/projects/<project_id>/spreads/<spread_id>/change-template` -
+>   body: `{"template_id": str}`. מחזיר `{"project_id", "spread_id",
+>   "status", "error_reason", "message", "template_id"}`. אותה קונבנציה
+>   400/404/200+status כמו replace-photo מעלה.
+> - `GET /api/templates` - עטיפה דקה מעל `layout_engine.TEMPLATES` (קטלוג
+>   6 התבניות הקבוע, כבר נטען מ-`templates.json`), מחזירה `{"templates":
+>   [...]}`. נוחות ל-UI (בורר-תבניות ב-`change_template`) - בלי לשכפל את
+>   קובץ ה-JSON בצד frontend-rtl.
+>
+> **לא ממומש כאן בכוונה, ממשיך להישאר מחוץ להיקף**: `regenerate_layout`
+> ("יצירה מחדש" המלאה - modal אישור + `export_agent.snapshot_structure`,
+> הזרימה המתועדת בסעיף 6) - זו *לא* הפעולה שה-issue הזה (#9) מבקש
+> ("החלפת תמונות ושינוי תבנית", לא "יצירה מחדש של כל האלבום"); אם/כשתידרש
+> בעתיד, היא עובדת-אלגוריתם שונה (קוראת שוב ל-`generate_layout` מלא) ולא
+> תלויה במה שמומש כאן. **`frontend-rtl`**: בונה UI מעל ה-endpoints האלה
+> בהמשך הענף הזה (`issue-9-f08-swap-template`) - ראה דוח ה-handback
+> המלא ל-API contract (endpoint paths + JSON shapes) שה-UI אמור להיבנות
+> נגדו בלי לקרוא את כל קוד `layout_engine/api.py`.
 
 ### 4.4 layout-engine → (DB) → export-agent
 

@@ -1,10 +1,11 @@
 """
-בדיקות API ל-F07 (issue #8): endpoint יצירת הכפולות.
+בדיקות API ל-F07 (issue #8): endpoint יצירת הכפולות, ו-F08 (issue #9):
+endpoints להחלפת תמונה/שינוי תבנית/קריאת מצב הכפולות.
 
 משתמש ב-Flask `app.test_client()` (לא httpx) - ראה INTERFACES.md סעיף 1.
-בודק רק את שכבת ה-HTTP (עטיפה דקה 1:1 מעל layout_engine.api.generate_layout,
-כולל שליפת selected_photo_ids לפי selected_for_album/selection_order) -
-האלגוריתם עצמו מכוסה ב-tests/test_layout_engine.py.
+בודק רק את שכבת ה-HTTP (עטיפה דקה 1:1 מעל layout_engine.api.generate_layout/
+replace_photo_in_slot/change_template/get_spreads) - האלגוריתם עצמו מכוסה
+ב-tests/test_layout_engine.py ו-tests/test_layout_engine_swap.py.
 
 מכסה:
   (א) POST /generate-layout על פרויקט לא קיים -> 404 מסודר.
@@ -12,6 +13,12 @@
       spread_ids/spread_count משתקפים גם ב-DB.
   (ג) פחות מ-15 תמונות נבחרות -> 200 (לא שגיאת HTTP), status="error".
   (ד) הרצה חוזרת מחליפה את הכפולות הקודמות.
+  (ה) F08: GET /spreads - מצב ראשוני, ואחרי swap/שינוי תבנית ("שחזור").
+  (ו) F08: POST /replace-photo - הצלחה, דחייה (exclude), דחייה (לא בפרויקט),
+      404 על פרויקט לא קיים, 400 על body חסר.
+  (ז) F08: POST /change-template - הצלחה, דחייה (slot_count_mismatch),
+      404 על פרויקט לא קיים, 400 על body חסר.
+  (ח) GET /api/templates - קטלוג שלם.
 """
 
 from __future__ import annotations
@@ -247,3 +254,248 @@ def test_generate_layout_rerun_replaces_previous_spreads(client):
         assert set(row["id"] for row in rows).isdisjoint(first_spread_ids)
     finally:
         conn.close()
+
+
+# ===========================================================================
+# F08 (issue #9): replace-photo / change-template / GET spreads / templates.
+# ===========================================================================
+def _generate_full_layout(test_client, main_mod, project_id: str, count: int = 60) -> dict:
+    """בונה פרויקט עם `count` תמונות נבחרות (60 כברירת מחדל -> grid-mixed,
+    4 תמונות בדיוק לכל כפולה - נוח ל-change-template) וקורא ל-generate-layout
+    האמיתי (דרך ה-API), מחזיר את ה-body של generate-layout."""
+    _make_selected_photos(main_mod, project_id, count)
+    resp = test_client.post(f"/api/projects/{project_id}/generate-layout")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok", body
+    return body
+
+
+def _get_spreads(test_client, project_id: str) -> list[dict]:
+    resp = test_client.get(f"/api/projects/{project_id}/spreads")
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()["spreads"]
+
+
+# ---------------------------------------------------------------------------
+# (ה) GET /spreads - מצב ראשוני ושחזור אחרי swap/שינוי תבנית.
+# ---------------------------------------------------------------------------
+def test_get_spreads_nonexistent_project_returns_404(client):
+    test_client, _main_mod = client
+    resp = test_client.get("/api/projects/does-not-exist/spreads")
+    assert resp.status_code == 404
+    assert resp.get_json().get("error") is True
+
+
+def test_get_spreads_returns_current_state_with_thumbnail_fields(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+
+    spreads = _get_spreads(test_client, project_id)
+    assert len(spreads) == 15
+    assert [s["position"] for s in spreads] == list(range(1, 16))
+    first = spreads[0]
+    assert first["template_id"] == "grid-mixed"
+    assert len(first["photos"]) == 4
+    for p in first["photos"]:
+        assert "thumbnail_url" in p  # None כי אין thumb_path אמיתי בטסט הזה
+        assert "width" in p and "height" in p
+
+
+# ---------------------------------------------------------------------------
+# (ו) POST /replace-photo.
+# ---------------------------------------------------------------------------
+def test_replace_photo_route_success_and_reflected_on_reload(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+
+    spreads_before = _get_spreads(test_client, project_id)
+    first_spread = spreads_before[0]
+    old_photo_id = first_spread["photos"][0]["photo_id"]
+    new_photo_id = _insert_raw_photo(main_mod, project_id)
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{first_spread['spread_id']}/replace-photo",
+        json={"old_photo_id": old_photo_id, "new_photo_id": new_photo_id},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok", body
+    assert body["error_reason"] is None
+    assert body["spread_id"] == first_spread["spread_id"]
+
+    # "שחזור" - קריאה חדשה ל-GET /spreads משקפת את ההחלפה.
+    spreads_after = _get_spreads(test_client, project_id)
+    first_after = [s for s in spreads_after if s["spread_id"] == first_spread["spread_id"]][0]
+    placed_ids = {p["photo_id"] for p in first_after["photos"]}
+    assert new_photo_id in placed_ids
+    assert old_photo_id not in placed_ids
+    assert first_after["version"] == first_spread["version"] + 1
+
+
+def test_replace_photo_route_rejected_for_excluded_photo(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+
+    spreads = _get_spreads(test_client, project_id)
+    first_spread = spreads[0]
+    old_photo_id = first_spread["photos"][0]["photo_id"]
+    excluded_photo_id = _insert_raw_photo(main_mod, project_id, flag="exclude")
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{first_spread['spread_id']}/replace-photo",
+        json={"old_photo_id": old_photo_id, "new_photo_id": excluded_photo_id},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "error"
+    assert body["error_reason"] == "new_photo_excluded"
+
+
+def test_replace_photo_route_rejected_for_photo_not_in_project(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+
+    other_project_id = _create_project(test_client, name="פרויקט אחר")
+    foreign_photo_id = _insert_raw_photo(main_mod, other_project_id)
+
+    spreads = _get_spreads(test_client, project_id)
+    first_spread = spreads[0]
+    old_photo_id = first_spread["photos"][0]["photo_id"]
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{first_spread['spread_id']}/replace-photo",
+        json={"old_photo_id": old_photo_id, "new_photo_id": foreign_photo_id},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "error"
+    assert body["error_reason"] == "new_photo_not_found"
+
+
+def test_replace_photo_route_nonexistent_project_returns_404(client):
+    test_client, _main_mod = client
+    resp = test_client.post(
+        "/api/projects/does-not-exist/spreads/some-spread/replace-photo",
+        json={"old_photo_id": "a", "new_photo_id": "b"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json().get("error") is True
+
+
+def test_replace_photo_route_missing_body_fields_returns_400(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+    spreads = _get_spreads(test_client, project_id)
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{spreads[0]['spread_id']}/replace-photo",
+        json={"old_photo_id": "only-old"},
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# (ז) POST /change-template.
+# ---------------------------------------------------------------------------
+def test_change_template_route_success_and_reflected_on_reload(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)  # grid-mixed, 4 תמונות
+
+    spreads = _get_spreads(test_client, project_id)
+    first_spread = spreads[0]
+    assert first_spread["template_id"] == "grid-mixed"
+
+    # מצמצם ל-2 תמונות דרך DB ישירות כדי שיתאים ל-duo-landscape.
+    import db as db_mod
+
+    conn = db_mod.get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM spread_photos WHERE spread_id = ? AND slot_index IN (2, 3)",
+            (first_spread["spread_id"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{first_spread['spread_id']}/change-template",
+        json={"template_id": "duo-landscape"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok", body
+    assert body["template_id"] == "duo-landscape"
+
+    spreads_after = _get_spreads(test_client, project_id)
+    first_after = [s for s in spreads_after if s["spread_id"] == first_spread["spread_id"]][0]
+    assert first_after["template_id"] == "duo-landscape"
+    assert len(first_after["photos"]) == 2
+    assert first_after["version"] == first_spread["version"] + 1
+
+
+def test_change_template_route_rejected_for_slot_count_mismatch(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)  # grid-mixed, 4 תמונות
+
+    spreads = _get_spreads(test_client, project_id)
+    first_spread = spreads[0]
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{first_spread['spread_id']}/change-template",
+        json={"template_id": "trio-mixed"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "error"
+    assert body["error_reason"] == "slot_count_mismatch"
+
+
+def test_change_template_route_nonexistent_project_returns_404(client):
+    test_client, _main_mod = client
+    resp = test_client.post(
+        "/api/projects/does-not-exist/spreads/some-spread/change-template",
+        json={"template_id": "trio-mixed"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json().get("error") is True
+
+
+def test_change_template_route_missing_body_returns_400(client):
+    test_client, main_mod = client
+    project_id = _create_project(test_client)
+    _generate_full_layout(test_client, main_mod, project_id)
+    spreads = _get_spreads(test_client, project_id)
+
+    resp = test_client.post(
+        f"/api/projects/{project_id}/spreads/{spreads[0]['spread_id']}/change-template",
+        json={},
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# (ח) GET /api/templates.
+# ---------------------------------------------------------------------------
+def test_list_templates_route_returns_full_catalog(client):
+    test_client, _main_mod = client
+    resp = test_client.get("/api/templates")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    template_ids = {tpl["id"] for tpl in body["templates"]}
+    assert template_ids == {
+        "single-feature-landscape",
+        "single-feature-portrait",
+        "duo-landscape",
+        "duo-portrait",
+        "trio-mixed",
+        "grid-mixed",
+    }
