@@ -20,6 +20,15 @@ numpy==1.26.4
 
 # ייצוא PDF (export-agent: F09) - רינדור HTML/CSS זהה ל-preview ב-UI
 weasyprint==62.3
+                              # הערה (issue #10): PyPI חסום בסביבת הפיתוח/CI
+                              # הנוכחית (וגם תלויות-המערכת של weasyprint - Pango/
+                              # Cairo - חסרות), אז זה בפועל לא מותקן כאן;
+                              # export_agent/api.py (export_album) משתמש במקום
+                              # זה ב-reportlab (מותקן מראש) שמחשב ישירות את
+                              # גיאומטריית הסלוטים ומצייר ל-PDF - ראה INTERFACES.md
+                              # סעיף 4.4.
+reportlab==5.0.1             # ציור ה-PDF (fallback ל-weasyprint, ראה מעלה)
+pypdf==6.17.0                # קריאת PDF לבדיקות (tests/test_export_agent.py)
 
 # טסטים (qa-agent)
 pytest==8.3.3
