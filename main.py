@@ -40,6 +40,18 @@ Endpoints (F05, issue #6 - עטיפת HTTP דקה מעל selection_engine.api.ta
                                               תמונות הפרויקט (מעדכן photos.event_stage/
                                               event_stage_confidence/needs_stage_review).
 
+Endpoints (F06, issue #7 - עטיפת HTTP דקה מעל selection_engine.api.run_selection,
+ראה INTERFACES.md סעיף 4.2):
+  POST  /api/projects/<project_id>/run-selection - מריץ את אלגוריתם הבחירה
+                                              (עד 60 תמונות, כולל must,
+                                              ללא exclude, מצמצם כפילויות
+                                              לפי similarity_group_id).
+                                              מחזיר status="ok"/"too_many_must"/
+                                              "too_few_photos" - 200 בכל
+                                              המקרים (כמו upload_photo, ה-UI
+                                              מחליט מה להציג לפי status, לא
+                                              לפי HTTP status code).
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -553,6 +565,33 @@ def tag_event_stages_route(project_id: str):
                 for row in rows
             ],
             "needs_review_count": needs_review_count,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F06 (issue #7): אלגוריתם בחירה - עד 60 תמונות. עטיפת HTTP דקה 1:1 מעל
+# selection_engine.api.run_selection - אין לוגיקת בחירה/דירוג כאן, ראה
+# INTERFACES.md סעיף 4.2. 200 בכל המקרים (גם status="too_many_must"/
+# "too_few_photos") - אלה לא שגיאות HTTP, זו תוצאה תקינה של הרצת האלגוריתם
+# שה-UI מציג כהודעה למשתמשת (בדיוק כמו upload_photo עם status="failed").
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/run-selection", methods=["POST"])
+def run_selection_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    result = selection_engine.run_selection(project_id, conn)
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "status": result.status,
+            "selected_photo_ids": result.selected_photo_ids,
+            "selected_count": len(result.selected_photo_ids),
+            "message": result.message,
         }
     )
 
