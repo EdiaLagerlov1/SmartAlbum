@@ -113,6 +113,23 @@ export_agent.api, ראה INTERFACES.md סעיף 4.3/4.4/6):
                                               לבנות את תפריט "שינוי תבנית" בלי
                                               לשכפל את ה-JSON בקוד ה-JS.
 
+Endpoints (F09, issue #10 - עטיפת HTTP דקה מעל export_agent.api.export_album,
+ראה INTERFACES.md סעיף 4.4):
+  POST  /api/projects/<project_id>/export - מריץ את export_album (רינדור
+                                              PDF זהה ל-preview + כתיבת
+                                              album_structure.json). 200 גם
+                                              על status="error" (אותה
+                                              קונבנציה כמו generate-layout/
+                                              run-selection - כולל המקרה
+                                              שבו WeasyPrint לא מותקן
+                                              בסביבה הזו). 404 רק אם
+                                              הפרויקט לא קיים.
+  GET   /api/projects/<project_id>/export/download - מגיש את album.pdf
+                                              שנכתב ע"י export_album, אם
+                                              קיים (אותו דפוס send_from_directory
+                                              כמו /photos/<id>/thumbnail
+                                              מעלה). 404 אם אין PDF עדיין.
+
 חיבור DB: חיבור sqlite3 *חדש* per-request (נפתח ב-get_db(), נסגר
 ב-teardown_appcontext) - לא חיבור גלובלי משותף בין threads (dev server
 של Flask הוא multi-threaded כברירת מחדל).
@@ -931,6 +948,59 @@ def list_templates():
             ]
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# F09 (issue #10): ייצוא PDF זהה ל-preview + album_structure.json. עטיפת
+# HTTP דקה 1:1 מעל export_agent.api.export_album - *אין* כאן לוגיקת
+# רינדור/ולידציה (ראה INTERFACES.md סעיף 4.4) - רק המרת ExportResult
+# לתשובת JSON. 200 גם על status="error" (אותה קונבנציה כמו generate-layout/
+# run-selection) - כולל המקרה שבו WeasyPrint לא מותקן בסביבה (הודעה ברורה
+# ב-message, לא 500/traceback). 404 רק אם הפרויקט לא קיים כלל.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/export", methods=["POST"])
+def export_album_route(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    result = export_agent.export_album(project_id, conn)
+
+    return jsonify(
+        {
+            "project_id": project_id,
+            "status": result.status,
+            "pdf_path": result.pdf_path,
+            "structure_path": result.structure_path,
+            "message": result.message,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# F09 (issue #10): הורדת album.pdf שנכתב ע"י export_album - נוחות ל-UI,
+# לא חלק מהחוזה הפורמלי בין המודולים (אותו דפוס send_from_directory כמו
+# get_thumbnail מעלה). 404 אם הפרויקט לא קיים, או אם עדיין לא נוצר PDF
+# (export_album לא רץ בהצלחה עדיין) - לא יוצר/מרנדר כלום כאן.
+# ---------------------------------------------------------------------------
+@app.route("/api/projects/<project_id>/export/download", methods=["GET"])
+def download_album_pdf(project_id: str):
+    conn = get_db()
+    project = _get_project_or_404(conn, project_id)
+    if project is None:
+        return _json_error(f"פרויקט לא נמצא: {project_id}", 404, error_reason="project_not_found")
+
+    pdf_path = storage.export_pdf_path(project_id)
+    if not pdf_path.is_file():
+        return _json_error(
+            "לא נמצא PDF מיוצא לפרויקט זה (יש להריץ ייצוא קודם)",
+            404,
+            error_reason="pdf_not_found",
+        )
+
+    directory, filename = os.path.split(str(pdf_path))
+    return send_from_directory(directory, filename, mimetype="application/pdf")
 
 
 # ---------------------------------------------------------------------------
