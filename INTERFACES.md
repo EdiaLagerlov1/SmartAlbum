@@ -557,6 +557,70 @@ def change_template(spread_id: str, new_template_id: str,
 > `replace_photo_in_slot`/`change_template` **לא** נוגעות ב-`processing_jobs`
 > בכלל (עריכות-ידניות בודדות על כפולה אחת, לא "הרצת שלב pipeline" מחדש).
 
+> **עדכון (frontend-rtl, issue #9 / F08)**: חיווט ה-HTTP/UI מעל שלוש
+> הפונקציות של layout-engine (מעלה) ומעל `export_agent.snapshot_structure`
+> (סעיף 4.4) - commit נפרד על אותו branch, אחרי commit ה-layout-engine.
+> **לא השתנתה אף חתימה/קונבנציית-כשל מתועדת** - רק עטיפות HTTP דקות
+> ב-`main.py` (לפי כלל סעיף 1) ו-UI ב-`static/`.
+>
+> endpoints חדשים ב-`main.py`:
+> - `GET /api/projects/<project_id>/spreads` - דאמפ קריאה-בלבד של 15
+>   הכפולות + שיבוץ התמונות per-slot (עם `thumbnail_url`/`original_filename`,
+>   מחייב `JOIN` ל-`photos`) - נוחות ל-UI, **לא** חלק מהחוזה הפורמלי
+>   בין המודולים (אין שינוי סעיף 4.3/4.4). 404 אם הפרויקט לא קיים.
+> - `POST /api/projects/<project_id>/spreads/<spread_id>/replace-photo`
+>   (body: `{"slot_index", "new_photo_id"}`) - עטיפה דקה 1:1 מעל
+>   `layout_engine.api.replace_photo_in_slot`. 404 אם הפרויקט או הכפולה
+>   (בפרויקט הזה) לא קיימים; 400 אם שדה חובה חסר; **200** עם
+>   `{"status": "ok"|"error", "message"}` על תוצאת ה-`bool` (אותה קונבנציה
+>   כמו `generate-layout`/`run-selection` - כשל-ולידציה "נורמלי" הוא
+>   `status="error"`, לא קוד HTTP 4xx/5xx).
+> - `POST /api/projects/<project_id>/spreads/<spread_id>/change-template`
+>   (body: `{"new_template_id"}`) - עטיפה דקה 1:1 מעל
+>   `layout_engine.api.change_template`, אותה קונבנציית 200/404/400 מעלה.
+> - `POST /api/projects/<project_id>/regenerate-layout` - **מממש בפועל,
+>   בתוך ה-request handler היחיד הזה, את שלבים 2-3 של זרימת סעיף 6**: קורא
+>   קודם ל-`export_agent.snapshot_structure(project_id, db)` (כותב
+>   `album_structure_prev.json`), ו**רק אחרי שהוא מחזיר** קורא ל-
+>   `layout_engine.regenerate_layout(project_id, db)`. שתי הקריאות
+>   סדרתיות באותו תהליך Python/connection - אין "חלון זמן" שבו אפשר להגיע
+>   ל-regenerate_layout דרך ה-endpoint הזה בלי snapshot קודם. מחזיר
+>   `{"project_id","status","spread_ids","spread_count","message",
+>   "snapshot_path"}` - 200 גם על `status="error"` (אותה קונבנציה).
+>   **שלב 1 בסעיף 6 (modal אישור מפורש) הוא לוגיקת-UI בצד הלקוח בלבד -
+>   ממומש ב-`static/`, לא ב-endpoint הזה** (ה-endpoint לא יכול לאכוף/לדעת
+>   שהוצג modal - זה state של דפדפן, לא של שרת; ראה גם ההערה המקורית של
+>   סוכן ה-layout-engine בדבר "אין state/lock חדש ב-DB" - לא נוספה כזו גם
+>   כאן).
+> - `GET /api/projects/<project_id>/structure-prev` - קריאה **בלבד** של
+>   תוכן `album_structure_prev.json` (JSON), ל-UI שמציג/מאפשר לעיין בגיבוי
+>   ה-"שחזור הידני" (סעיף 6, שלב 4). 404 (`error_reason="no_snapshot"`) אם
+>   אין עדיין קובץ (אף `regenerate-layout` לא רץ). **הוחלט בכוונה לא להוסיף
+>   endpoint-שחזור-אוטומטי** (למשל `POST .../restore-prev`) - סעיף 6 שלב 4
+>   קובע במפורש "אין undo אוטומטי בגרסת הבסיס; השחזור ידני" - endpoint כזה
+>   היה סותר את החוזה המתועד בלי אישור architect מפורש, ולא התבקש ב-issue.
+> - `GET /api/templates` - קטלוג 6 התבניות הקבועות (`layout_engine/
+>   templates.json`, נקרא דרך `layout_engine.api.TEMPLATES` הטעון ממנו) -
+>   נוחות ל-UI לבניית תפריט "שינוי תבנית" בלי לשכפל את ה-JSON ב-JS (לפי
+>   ההערה הקיימת בסעיף 4.3: "frontend-rtl ו-export-agent קוראים את אותו
+>   ה-JSON").
+>
+> **UI (`static/`)**: נוסף section "כפולות האלבום" (`index.html`/`app.js`/
+> `style.css`) עם כרטיס per-כפולה (position/template_id/version + תמונה
+> per-slot עם `select` להחלפה + כפתור), `select`+כפתור "שינוי תבנית" per
+> כפולה, וכפתור "יצירה מחדש" שחוסם מאחורי **modal אישור מפורש** (לא
+> type-to-confirm כמו מודל המחיקה של F10 - סעיף 6 לא דורש זאת, רק "אישור
+> מפורש"; type-to-confirm נשאר שמור ל-מחיקת-פרויקט הבלתי-הפיכה ב-F10) -
+> רק לחיצה על "אישור" ב-modal קוראת ל-`POST .../regenerate-layout`. כל
+> פעולת עריכה (החלפה/שינוי תבנית/יצירה מחדש) היא **שמירה מפורשת** בלחיצת
+> כפתור - אין auto-save; פתיחה מחדש של הפרויקט קוראת מה-DB דרך
+> `GET .../spreads` ולכן משחזרת תמיד את הגרסה האחרונה שנשמרה (אין state
+> מקומי ב-דפדפן שצריך "לשחזר" בנפרד). כפתור "הצגת הגיבוי האחרון" קורא
+> ל-`GET .../structure-prev` ומציג את ה-JSON כטקסט לעיון - **לא** מבצע
+> שחזור אוטומטי לתוך ה-DB (עקבי עם ההחלטה מעלה). תפריט "החלפת תמונה"
+> מסנן בצד-לקוח תמונות עם `flag === 'exclude'` (ולידציה נוספת, לא מחליפה
+> את הולידציה המחייבת בצד השרת ב-`replace_photo_in_slot`).
+
 ### 4.4 layout-engine → (DB) → export-agent
 
 ```python

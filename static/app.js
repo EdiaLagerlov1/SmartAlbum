@@ -14,6 +14,12 @@
   const state = {
     projectId: null,
     projectName: null,
+    // F08 (issue #9): תמונות הפרויקט (מ-loadPhotos) - נדרש כדי לבנות את
+    // רשימת "התמונות המועמדות להחלפה" (רק flag !== 'exclude', ראה החוזה
+    // המחייב ב-layout_engine.api.replace_photo_in_slot/INTERFACES.md 4.3),
+    // ו-templates (מ-/api/templates) - נדרש לתפריט "שינוי תבנית".
+    photos: [],
+    templates: [],
   };
 
   const el = {
@@ -47,6 +53,20 @@
     deleteModalError: document.getElementById("delete-modal-error"),
     deleteConfirmBtn: document.getElementById("delete-confirm-btn"),
     deleteCancelBtn: document.getElementById("delete-cancel-btn"),
+    // F08 (issue #9): כפולות האלבום.
+    spreadsSection: document.getElementById("spreads-section"),
+    refreshSpreadsBtn: document.getElementById("refresh-spreads-btn"),
+    regenerateLayoutBtn: document.getElementById("regenerate-layout-btn"),
+    showPrevSnapshotBtn: document.getElementById("show-prev-snapshot-btn"),
+    spreadsEmptyMsg: document.getElementById("spreads-empty-msg"),
+    regenerateResult: document.getElementById("regenerate-result"),
+    prevSnapshotBox: document.getElementById("prev-snapshot-box"),
+    prevSnapshotContent: document.getElementById("prev-snapshot-content"),
+    spreadsList: document.getElementById("spreads-list"),
+    regenerateModalOverlay: document.getElementById("regenerate-modal-overlay"),
+    regenerateModalError: document.getElementById("regenerate-modal-error"),
+    regenerateConfirmBtn: document.getElementById("regenerate-confirm-btn"),
+    regenerateCancelBtn: document.getElementById("regenerate-cancel-btn"),
   };
 
   // מילת האישור ל-type-to-confirm במודל המחיקה (F10) - קבועה, לא תלויה
@@ -88,9 +108,15 @@
       el.projectInfo.hidden = false;
       el.uploadSection.hidden = false;
       el.photosSection.hidden = false;
+      el.spreadsSection.hidden = false;
       el.statusSection.hidden = false;
       await loadPhotos();
       await loadStatus();
+      await loadTemplatesCatalog();
+      // F08: פתיחה מחדש של פרויקט משחזרת את הגרסה האחרונה שנשמרה -
+      // loadSpreads() קוראת ישירות מה-DB (GET /spreads), כך שתמיד משקפת
+      // את מה שנשמר אחרון (אין "draft" מקומי שצריך לשחזר בנפרד).
+      await loadSpreads();
     } catch (err) {
       el.projectError.textContent = "שגיאת תקשורת עם השרת: " + err.message;
       el.projectError.hidden = false;
@@ -275,6 +301,7 @@
   }
 
   function renderPhotos(photos) {
+    state.photos = photos; // F08: נדרש לבניית רשימת המועמדות ל"החלפת תמונה"
     el.photosGrid.innerHTML = "";
     photos.forEach((photo) => {
       const card = document.createElement("div");
@@ -436,6 +463,7 @@
   function resetProjectUi() {
     state.projectId = null;
     state.projectName = null;
+    state.photos = [];
     el.projectInfo.hidden = true;
     el.uploadSection.hidden = true;
     el.photosSection.hidden = true;
@@ -448,6 +476,13 @@
     el.retryResult.hidden = true;
     el.photosFailedSummary.hidden = true;
     el.projectNameInput.value = "";
+    // F08 (issue #9): איפוס מצב הכפולות.
+    el.spreadsSection.hidden = true;
+    el.spreadsList.innerHTML = "";
+    el.spreadsEmptyMsg.hidden = true;
+    el.regenerateResult.hidden = true;
+    el.prevSnapshotBox.hidden = true;
+    el.prevSnapshotContent.textContent = "";
   }
 
   async function confirmDeleteProject() {
@@ -478,6 +513,266 @@
     }
   }
 
+  // --------------------------------------------------------------------
+  // F08 (issue #9): כפולות האלבום - החלפת תמונה, שינוי תבנית, יצירה מחדש
+  // (עם modal אישור מפורש לפי INTERFACES.md סעיף 6) ושחזור-ידני (קריאה
+  // בלבד) של הגיבוי האחרון.
+  //
+  // כל פעולת עריכה כאן (החלפה/שינוי תבנית/יצירה מחדש) היא שמירה מפורשת -
+  // נכתבת ל-DB עם לחיצת הכפתור הרלוונטית בלבד, בלי auto-save ברקע.
+  // פתיחה מחדש של הפרויקט (createProject -> loadSpreads) קוראת תמיד
+  // ישירות מה-DB, כך שמשקפת את "הגרסה האחרונה שנשמרה" (אין state מקומי
+  // שצריך לשחזר בנפרד ב-localStorage/sessionStorage).
+  // --------------------------------------------------------------------
+  async function loadTemplatesCatalog() {
+    try {
+      const resp = await fetch("/api/templates");
+      if (!resp.ok) return;
+      const body = await resp.json();
+      state.templates = body.templates || [];
+    } catch (_err) {
+      // שקט - נוחות ל-UI (תפריט "שינוי תבנית"), לא קריטי לשאר הזרימה.
+    }
+  }
+
+  function nonExcludedPhotoOptions(selectedPhotoId) {
+    // "רק מתוך תמונות הפרויקט שלא הוחרגו" - ולידציית-צד-לקוח, השרת הוא
+    // מקור האמת (layout_engine.api.replace_photo_in_slot דוחה exclude בכל
+    // מקרה, ראה INTERFACES.md סעיף 4.3) - כאן רק לא מציעים אותן בתפריט.
+    return state.photos
+      .filter((p) => p.flag !== "exclude")
+      .map((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.photo_id;
+        opt.textContent = p.original_filename + (p.photo_id === selectedPhotoId ? " (נוכחית)" : "");
+        if (p.photo_id === selectedPhotoId) opt.selected = true;
+        return opt;
+      });
+  }
+
+  function templateOptions(selectedTemplateId) {
+    return state.templates.map((tpl) => {
+      const opt = document.createElement("option");
+      opt.value = tpl.id;
+      opt.textContent = `${tpl.id} (${tpl.slot_count} תמונות)`;
+      if (tpl.id === selectedTemplateId) opt.selected = true;
+      return opt;
+    });
+  }
+
+  function renderSpreadCard(spread) {
+    const card = document.createElement("div");
+    card.className = "spread-card";
+
+    const header = document.createElement("div");
+    header.className = "spread-card-header";
+    header.innerHTML =
+      `<span>כפולה ${spread.position}</span>` +
+      `<span class="muted">תבנית נוכחית: ${spread.template_id}</span>` +
+      `<span class="muted">גרסה: ${spread.version}</span>`;
+    card.appendChild(header);
+
+    const photosRow = document.createElement("div");
+    photosRow.className = "spread-photos";
+
+    spread.photos.forEach((photo) => {
+      const slotBox = document.createElement("div");
+      slotBox.className = "spread-photo-slot";
+
+      const img = document.createElement("img");
+      img.src = photo.thumbnail_url || "";
+      img.alt = photo.original_filename || "";
+      img.loading = "lazy";
+
+      const label = document.createElement("span");
+      label.className = "slot-label" + (photo.is_dominant ? " dominant" : "");
+      label.textContent = `סלוט ${photo.slot_index}` + (photo.is_dominant ? " - דומיננטי" : "");
+
+      const select = document.createElement("select");
+      nonExcludedPhotoOptions(photo.photo_id).forEach((opt) => select.appendChild(opt));
+
+      const replaceBtn = document.createElement("button");
+      replaceBtn.className = "btn btn-secondary";
+      replaceBtn.textContent = "החלפת תמונה בסלוט זה";
+      replaceBtn.addEventListener("click", () =>
+        replacePhotoInSlot(spread.spread_id, photo.slot_index, select.value, slotResultP)
+      );
+
+      const slotResultP = document.createElement("p");
+      slotResultP.className = "spread-action-result muted";
+      slotResultP.hidden = true;
+
+      slotBox.appendChild(img);
+      slotBox.appendChild(label);
+      slotBox.appendChild(select);
+      slotBox.appendChild(replaceBtn);
+      slotBox.appendChild(slotResultP);
+      photosRow.appendChild(slotBox);
+    });
+
+    card.appendChild(photosRow);
+
+    const templateRow = document.createElement("div");
+    templateRow.className = "spread-actions-row";
+
+    const templateLabel = document.createElement("label");
+    templateLabel.textContent = "שינוי תבנית:";
+
+    const templateSelect = document.createElement("select");
+    templateOptions(spread.template_id).forEach((opt) => templateSelect.appendChild(opt));
+
+    const templateBtn = document.createElement("button");
+    templateBtn.className = "btn btn-secondary";
+    templateBtn.textContent = "החלת תבנית";
+
+    const templateResultP = document.createElement("p");
+    templateResultP.className = "spread-action-result muted";
+    templateResultP.hidden = true;
+
+    templateBtn.addEventListener("click", () =>
+      changeSpreadTemplate(spread.spread_id, templateSelect.value, templateResultP)
+    );
+
+    templateRow.appendChild(templateLabel);
+    templateRow.appendChild(templateSelect);
+    templateRow.appendChild(templateBtn);
+    card.appendChild(templateRow);
+    card.appendChild(templateResultP);
+
+    return card;
+  }
+
+  function renderSpreads(spreads) {
+    el.spreadsList.innerHTML = "";
+    el.spreadsEmptyMsg.hidden = spreads.length !== 0;
+    spreads.forEach((spread) => el.spreadsList.appendChild(renderSpreadCard(spread)));
+  }
+
+  async function loadSpreads() {
+    if (!state.projectId) return;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/spreads`);
+      if (!resp.ok) return;
+      const body = await resp.json();
+      renderSpreads(body.spreads || []);
+    } catch (_err) {
+      // שקט - כמו loadPhotos/loadStatus מעלה.
+    }
+  }
+
+  async function replacePhotoInSlot(spreadId, slotIndex, newPhotoId, resultEl) {
+    resultEl.hidden = true;
+    try {
+      const resp = await fetch(
+        `/api/projects/${state.projectId}/spreads/${spreadId}/replace-photo`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slot_index: slotIndex, new_photo_id: newPhotoId }),
+        }
+      );
+      const body = await resp.json();
+      const ok = resp.ok && body.status === "ok";
+      resultEl.hidden = false;
+      resultEl.textContent = ok ? "התמונה הוחלפה בהצלחה." : (body.message || "ההחלפה נכשלה");
+      resultEl.style.color = ok ? "" : "#b42318";
+      if (ok) await loadSpreads();
+    } catch (err) {
+      resultEl.hidden = false;
+      resultEl.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+      resultEl.style.color = "#b42318";
+    }
+  }
+
+  async function changeSpreadTemplate(spreadId, newTemplateId, resultEl) {
+    resultEl.hidden = true;
+    try {
+      const resp = await fetch(
+        `/api/projects/${state.projectId}/spreads/${spreadId}/change-template`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_template_id: newTemplateId }),
+        }
+      );
+      const body = await resp.json();
+      const ok = resp.ok && body.status === "ok";
+      resultEl.hidden = false;
+      resultEl.textContent = ok ? "התבנית עודכנה בהצלחה." : (body.message || "שינוי התבנית נכשל");
+      resultEl.style.color = ok ? "" : "#b42318";
+      if (ok) await loadSpreads();
+    } catch (err) {
+      resultEl.hidden = false;
+      resultEl.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+      resultEl.style.color = "#b42318";
+    }
+  }
+
+  // F08: "יצירה מחדש" - modal אישור מפורש (INTERFACES.md סעיף 6, שלב 1)
+  // *לפני* הקריאה ל-endpoint. ה-endpoint עצמו (main.py) מריץ בצד השרת,
+  // באותה בקשה, קודם export_agent.snapshot_structure ורק אז
+  // layout_engine.regenerate_layout (שלבים 2-3) - אין קריאת HTTP נפרדת
+  // מכאן ל-snapshot, כדי שלא יהיה מצב-ביניים שבו regenerate רץ בלי גיבוי.
+  function openRegenerateModal() {
+    el.regenerateModalError.hidden = true;
+    el.regenerateModalOverlay.hidden = false;
+  }
+
+  function closeRegenerateModal() {
+    el.regenerateModalOverlay.hidden = true;
+  }
+
+  async function confirmRegenerateLayout() {
+    if (!state.projectId) return;
+    el.regenerateConfirmBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/regenerate-layout`, {
+        method: "POST",
+      });
+      const body = await resp.json();
+      if (!resp.ok) {
+        el.regenerateModalError.hidden = false;
+        el.regenerateModalError.textContent = (body && body.message) || "יצירה מחדש נכשלה";
+        return;
+      }
+
+      closeRegenerateModal();
+      el.regenerateResult.hidden = false;
+      el.regenerateResult.textContent =
+        body.status === "ok"
+          ? `נוצרו מחדש ${body.spread_count} כפולות. הגרסה הקודמת נשמרה לגיבוי לפני המחיקה (שחזור ידני בלבד).`
+          : (body.message || "יצירה מחדש נכשלה");
+
+      await loadSpreads();
+    } catch (err) {
+      el.regenerateModalError.hidden = false;
+      el.regenerateModalError.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.regenerateConfirmBtn.disabled = false;
+    }
+  }
+
+  // F08 (סעיף 6, שלב 4): "אין undo אוטומטי בגרסת הבסיס; השחזור ידני מתוך
+  // album_structure_prev.json" - הכפתור הזה רק *מציג* את תוכן קובץ הגיבוי
+  // (קריאה בלבד) כדי שאפשר יהיה לעיין בו/לשחזר ממנו ידנית; אין כאן כפתור
+  // "שחזור" אוטומטי בכוונה.
+  async function showPrevSnapshot() {
+    if (!state.projectId) return;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/structure-prev`);
+      const body = await resp.json();
+      el.prevSnapshotBox.hidden = false;
+      if (!resp.ok) {
+        el.prevSnapshotContent.textContent = (body && body.message) || "אין גיבוי שמור";
+        return;
+      }
+      el.prevSnapshotContent.textContent = JSON.stringify(body, null, 2);
+    } catch (err) {
+      el.prevSnapshotBox.hidden = false;
+      el.prevSnapshotContent.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    }
+  }
+
   el.createProjectBtn.addEventListener("click", createProject);
   el.refreshPhotosBtn.addEventListener("click", loadPhotos);
   el.refreshStatusBtn.addEventListener("click", loadStatus);
@@ -491,5 +786,15 @@
   // סגירה בלחיצה מחוץ לתוכן ה-modal (לא רק כפתור ביטול).
   el.deleteModalOverlay.addEventListener("click", (e) => {
     if (e.target === el.deleteModalOverlay) closeDeleteModal();
+  });
+
+  // F08 (issue #9): כפולות האלבום.
+  el.refreshSpreadsBtn.addEventListener("click", loadSpreads);
+  el.regenerateLayoutBtn.addEventListener("click", openRegenerateModal);
+  el.regenerateCancelBtn.addEventListener("click", closeRegenerateModal);
+  el.regenerateConfirmBtn.addEventListener("click", confirmRegenerateLayout);
+  el.showPrevSnapshotBtn.addEventListener("click", showPrevSnapshot);
+  el.regenerateModalOverlay.addEventListener("click", (e) => {
+    if (e.target === el.regenerateModalOverlay) closeRegenerateModal();
   });
 })();

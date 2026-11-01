@@ -59,6 +59,32 @@
       <div id="photos-grid" class="photos-grid"></div>
     </section>
 
+    <!-- F08 (issue #9): כפולות האלבום - החלפת תמונה, שינוי תבנית, יצירה מחדש -->
+    <section class="card" id="spreads-section" hidden>
+      <h2>כפולות האלבום</h2>
+      <div class="row">
+        <button id="refresh-spreads-btn" class="btn btn-secondary">רענון כפולות</button>
+        <button id="regenerate-layout-btn" class="btn btn-primary">יצירה מחדש של כל הכפולות</button>
+        <button id="show-prev-snapshot-btn" class="btn btn-secondary">הצגת הגיבוי האחרון</button>
+      </div>
+      <p class="muted">
+        "יצירה מחדש" מוחקת ומחליפה את כל 15 הכפולות (כולל כל ההחלפות/שינויי התבנית
+        הידניים) ובונה אותן מחדש מהתמונות שנבחרו לאלבום. גרסה קודמת של המבנה נשמרת
+        אוטומטית לגיבוי לפני המחיקה - אך השחזור ממנו הוא <strong>ידני בלבד</strong> (אין "ביטול" אוטומטי).
+      </p>
+
+      <p id="spreads-empty-msg" class="muted" hidden>לא נוצרו עדיין כפולות לפרויקט זה - יש להריץ קודם "יצירת כפולות".</p>
+      <p id="regenerate-result" class="muted" hidden aria-live="polite"></p>
+
+      <div id="prev-snapshot-box" class="snapshot-box" hidden>
+        <h3>תוכן הגיבוי האחרון (<code>album_structure_prev.json</code>)</h3>
+        <p class="muted">זהו תוכן קובץ הגיבוי לעיון בלבד - שחזור ממנו (אם נדרש) הוא פעולה ידנית, לא אוטומטית.</p>
+        <pre id="prev-snapshot-content"></pre>
+      </div>
+
+      <div id="spreads-list" class="spreads-list" aria-live="polite"></div>
+    </section>
+
     <!-- F10: מצב עיבוד per-stage, ניסיון חוזר, ומחיקת פרויקט -->
     <section class="card" id="status-section" hidden>
       <h2>מצב עיבוד</h2>
@@ -96,6 +122,29 @@
       <div class="row">
         <button id="delete-confirm-btn" class="btn btn-danger" disabled>מחיקה לצמיתות</button>
         <button id="delete-cancel-btn" class="btn btn-secondary">ביטול</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- F08 (issue #9): modal אישור מפורש ל"יצירה מחדש" - ראה INTERFACES.md
+       סעיף 6, שלב 1. אישור כאן הוא תנאי-סף לקריאה ל-POST /regenerate-layout
+       (שמבצע בצד השרת snapshot_structure ואז regenerate_layout, שלבים 2-3). -->
+  <div id="regenerate-modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="regenerate-modal-title">
+      <h3 id="regenerate-modal-title">יצירה מחדש של כל הכפולות</h3>
+      <p>
+        פעולה זו תמחק את כל 15 הכפולות הנוכחיות - כולל כל ההחלפות ושינויי התבנית
+        הידניים שביצעת - ותיצור אותן מחדש מתוך התמונות שנבחרו לאלבום כעת.
+      </p>
+      <p>
+        גרסה קודמת של המבנה תישמר אוטומטית לקובץ גיבוי
+        (<code>album_structure_prev.json</code>), אך <strong>שחזור ממנו הוא ידני בלבד -
+        אין "ביטול" (undo) אוטומטי בגרסה הזו.</strong>
+      </p>
+      <p id="regenerate-modal-error" class="error-text" hidden></p>
+      <div class="row">
+        <button id="regenerate-confirm-btn" class="btn btn-danger">אישור - יצירה מחדש</button>
+        <button id="regenerate-cancel-btn" class="btn btn-secondary">ביטול</button>
       </div>
     </div>
   </div>
