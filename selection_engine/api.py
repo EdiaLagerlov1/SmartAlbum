@@ -11,6 +11,10 @@ SmartAlbum - selection-engine: F03 (סימון חובה/החרגה, issue #4) + 
   - `check_must_limit` - ספירת תמונות flag='must' בפרויקט + בדיקת הגבלת 60. F03.
   - `tag_event_stages` - קיבוץ לפי זמן (taken_at) לשלבי אירוע + סימון
                           "לבדיקה ידנית" כש-timestamp חסר/אמינות נמוכה. F05.
+  - `run_selection`    - אלגוריתם בחירה עד 60 תמונות: מכליל את כל ה-must,
+                          מכבד את כל ה-exclude, מצמצם כפילויות לפי
+                          similarity_group_id, ומסמן "חוסר תמונות" כש-סך
+                          התמונות התקינות (לא exclude) קטן מ-15. F06.
 
 `flag` הוא עמודה **יחידה** ב-`photos` (ראה schema.sql) עם `CHECK (flag IN
 ('none', 'must', 'exclude'))` - לכן טכנית אי אפשר שתמונה תהיה גם must וגם
@@ -18,9 +22,6 @@ exclude בו-זמנית (אין שני בוליאניים נפרדים). ה-CHEC
 הגנת-עומק; האימות העיקרי (כדי להחזיר הודעת שגיאה ברורה בעברית, לא
 sqlite3.IntegrityError גולמי) הוא כאן, ב-`set_flag`, ונאכף שוב ב-`main.py`
 (400 מסודר) - F03 מחייב דחייה "ב-UI/API layer, לא רק בלוגיקה".
-
-F06 (אלגוריתם בחירה) אינו ממומש במודול הזה עדיין - יתועד/יתווסף ב-issue
-נפרד, לפי אותו חוזה ב-INTERFACES.md סעיף 4.2.
 """
 
 from __future__ import annotations
@@ -294,3 +295,181 @@ def tag_event_stages(project_id: str, db: sqlite3.Connection) -> None:
         db.rollback()
         _set_job_status(db, project_id, "tagging", "failed", str(exc))
         raise
+
+
+# ===========================================================================
+# F06 (issue #7): אלגוריתם בחירה - עד 60 תמונות לאלבום.
+# ===========================================================================
+#
+# חוזה מחייב (ראה INTERFACES.md סעיף 4.2, ועדכון ה-architect שם מ-issue #5
+# "כלל חסימת-יצירה"):
+#   - `run_selection` קורא ל-`check_must_limit` כצעד **ראשון** - אם
+#     `must_count > MUST_LIMIT (60)`, מחזיר status="too_many_must" **בלי**
+#     לכתוב `selected_for_album`/`selection_order` בכלל (לא "לוקח את כל ה-60
+#     הראשונים" - זה היה דורס בחירה ידנית/תמונות must בלי התרעה; המשתמשת
+#     חייבת לתקן בחירה ולהריץ מחדש, לפי F03).
+#   - אחרת: מכליל את כל ה-must (עד 60 - מובטח ע"י ה-check למעלה), מכבד את
+#     כל ה-exclude (מסונן לגמרי, לא מגיע אפילו למאגר המועמדות), ומצמצם
+#     כפילויות לפי similarity_group_id (F04) בין שאר התמונות (flag='none')
+#     עד למכסה (60 - מספר ה-must).
+#   - אם סך התמונות התקינות (flag != 'exclude', כולל must+none) בפרויקט
+#     קטן מ-MIN_VALID_PHOTOS (15) - status="too_few_photos", גם בלי לכתוב
+#     כלום (לא "בחירה חלקית שקטה" - לפי האפיון: "מציגים בקשה להוסיף תמונות").
+#
+# אות האיכות לדירוג/בחירת-נציג-מקבוצה: `sharpness_score`/`exposure_score`
+# (F04 - "המלצה בלבד, לעולם לא עילה למחיקה אוטומטית"). השימוש כאן **אינו**
+# "מחיקה" - אף תמונה לא נפסלת/נמחקת בגלל ציון נמוך; האלגוריתם רק מדרג בין
+# מועמדות *תקינות* (לא must, לא exclude) כשיש יותר מדי כדי להחליט על סדר
+# עדיפות למכסה המוגבלת (60) ועל מי מייצג קבוצת-כפילויות - תמונה לא
+# "נפסלת", רק לא נבחרת הפעם; זו המלצה הניתנת לשינוי ידני אחר-כך (F08),
+# לא נעילה. sharpness_score הוא ה-key הראשי (Laplacian-variance, לא
+# מנורמל 0..1 - משמש כסדר-יחסי בין תמונות פרויקט אחד, לא כסף אבסולוטי),
+# exposure_score (0..1) הוא tie-breaker שני. תמונות בלי ציון (NULL, למשל
+# אם image-pipeline לא הצליח לחשב) מקבלות המפתח הנמוך ביותר (-1.0) - לא
+# "מומצא" ציון נייטרלי - כך שהן נדרגות אחרונות אבל עדיין יכולות להיבחר אם
+# אין מועמדות טובות יותר ויש מקום במכסה.
+MIN_VALID_PHOTOS = 15
+
+
+def _quality_sort_key(row: sqlite3.Row) -> tuple[float, float]:
+    """מפתח דירוג איכות (גבוה יותר = מועדף יותר) - ראה הערת-הראש מעל.
+    (sharpness_score, exposure_score), NULL -> -1.0 (לא ציון מומצא)."""
+    sharpness = row["sharpness_score"] if row["sharpness_score"] is not None else -1.0
+    exposure = row["exposure_score"] if row["exposure_score"] is not None else -1.0
+    return (sharpness, exposure)
+
+
+def _effective_datetime(row: sqlite3.Row) -> datetime:
+    """זמן "אפקטיבי" לסדר כרונולוגי מוצע (`selection_order`): `taken_at`
+    (F05) אם ניתן לפענוח, אחרת `uploaded_at` (NOT NULL לפי schema.sql, כך
+    שיש תמיד נפילה תקינה - לא "מנחש", רק מחליף אות-זמן חסרה באות-זמן אחרת
+    שקיימת בוודאות). datetime naive (בלי timezone) מנורמל ל-UTC כדי שלא
+    תהיה השוואת naive/aware שמעלה TypeError במיון."""
+    dt = _parse_taken_at(row["taken_at"]) or _parse_taken_at(row["uploaded_at"])
+    if dt is None:
+        # לא אמור לקרות (uploaded_at הוא NOT NULL ותמיד ISO-8601 תקין בפועל),
+        # אבל נפילה בטוחה בלי קריסה אם בכל זאת קרה (למשל בטסט עם ערך משובש).
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@dataclass
+class SelectionResult:
+    status: Literal["ok", "too_many_must", "too_few_photos"]
+    selected_photo_ids: list[str]
+    message: str | None
+
+
+def run_selection(project_id: str, db: sqlite3.Connection) -> SelectionResult:
+    """F06 (issue #7): בוחרת עד MUST_LIMIT (60) תמונות לאלבום.
+
+    אלגוריתם (לפי INTERFACES.md סעיף 4.2):
+      1. `check_must_limit` כצעד ראשון - `must_count > 60` -> status=
+         "too_many_must", **בלי** לכתוב כלום (לא נוגעת ב-selected_for_album/
+         selection_order הקיימים - "יצירה" חסומה, לא "בחירה חלקית").
+      2. תמונות flag='exclude' מסוננות לגמרי - לעולם לא מועמדות, אפילו לא
+         נכנסות לספירת "תקינות" לצורך הכלל הזה (הן *לא* תקינות, בהגדרה).
+      3. סך התמונות התקינות (flag != 'exclude', כולל must+none) בפרויקט
+         קטן מ-MIN_VALID_PHOTOS (15) -> status="too_few_photos", גם בלי
+         לכתוב כלום - "מציגים בקשה להוסיף תמונות", לא בחירה חלקית שקטה.
+      4. אחרת: כל תמונות ה-must (flag='must') נכללות תמיד (מובטח <= 60
+         ע"י שלב 1). יתר המכסה (60 - מספר ה-must) מתמלא ממועמדות flag='none',
+         אחרי צמצום כפילויות: תוך קבוצת similarity_group_id (F04) נבחר נציג
+         אחד בלבד - הציון הגבוה ביותר (`_quality_sort_key`) - ושאר חברי
+         הקבוצה לא נכללים אוטומטית. קבוצה שיש לה כבר נציג בין ה-must
+         (המשתמשת "הוסיפה במפורש" תמונה מאותה קבוצה ע"י סימון must) מדולגת
+         כליל בשלב הזה - אין טעם להוסיף עוד "כפילות" אוטומטית מקבוצה
+         שהמשתמשת כבר כיסתה במפורש; אם המשתמשת מסמנת must לכמה תמונות
+         מאותה קבוצה - כולן נכללות (זה בדיוק ה-"אלא אם המשתמשת הוסיפה
+         תמונה נוספת במפורש מאותה קבוצה" באפיון - המנגנון הקיים היחיד
+         ל"הוספה מפורשת" הוא דגל must, אין פרמטר override נפרד בחוזה).
+         תמונות בלי similarity_group_id (NULL - "תמונה יחידה", לפי
+         image_pipeline.group_similar_photos) נחשבות מועמדות עצמאיות,
+         לא מדוללות מול אף תמונה אחרת.
+      5. תוצאה סופית (must + נבחרות-none) ממוינת כרונולוגית (`_effective_datetime`)
+         ונכתבת ל-`photos.selected_for_album=1` + `photos.selection_order`
+         (1-based, לפי הסדר הזה) - זו *המלצה* ניתנת לשינוי ידני אחר-כך
+         (F08), לא נעילה. כל שאר תמונות הפרויקט מקבלות
+         `selected_for_album=0`/`selection_order=NULL` (דריסה של בחירה קודמת
+         אם `run_selection` רץ בעבר - "הרצה מחדש" מחליפה את הבחירה הקודמת
+         במלואה, לא מצרפת לה).
+    """
+    _set_job_status(db, project_id, "selection", "running")
+
+    must_check = check_must_limit(project_id, db)
+    if not must_check.ok:
+        _set_job_status(db, project_id, "selection", "failed", "too_many_must")
+        return SelectionResult(
+            status="too_many_must",
+            selected_photo_ids=[],
+            message=(
+                f"יותר מ-{MUST_LIMIT} תמונות מסומנות 'חובה' ({must_check.must_count}) - "
+                "יש לתקן את הבחירה (להוריד סימון 'חובה' מחלק מהתמונות) לפני יצירת האלבום"
+            ),
+        )
+
+    rows = db.execute(
+        """
+        SELECT id, flag, similarity_group_id, sharpness_score, exposure_score,
+               taken_at, uploaded_at
+        FROM photos WHERE project_id = ?
+        """,
+        (project_id,),
+    ).fetchall()
+
+    valid_rows = [row for row in rows if row["flag"] != "exclude"]
+    if len(valid_rows) < MIN_VALID_PHOTOS:
+        _set_job_status(db, project_id, "selection", "failed", "too_few_photos")
+        return SelectionResult(
+            status="too_few_photos",
+            selected_photo_ids=[],
+            message=(
+                f"יש רק {len(valid_rows)} תמונות תקינות (לא מוחרגות) בפרויקט - "
+                f"נדרשות לפחות {MIN_VALID_PHOTOS} כדי ליצור אלבום. יש להוסיף תמונות"
+            ),
+        )
+
+    must_rows = [row for row in valid_rows if row["flag"] == "must"]
+    other_rows = [row for row in valid_rows if row["flag"] != "must"]
+
+    # קבוצות similarity_group_id שכבר מיוצגות ע"י תמונת must - מדולגות כליל
+    # משלב צמצום-הכפילויות האוטומטי (ראה (4) ב-docstring).
+    must_group_ids = {row["similarity_group_id"] for row in must_rows if row["similarity_group_id"]}
+
+    groups: dict[str, list[sqlite3.Row]] = {}
+    standalone: list[sqlite3.Row] = []
+    for row in other_rows:
+        gid = row["similarity_group_id"]
+        if not gid:
+            standalone.append(row)
+        elif gid in must_group_ids:
+            continue  # קבוצה שכבר מכוסה ע"י must - לא מוסיפים נציג אוטומטי
+        else:
+            groups.setdefault(gid, []).append(row)
+
+    candidates = standalone + [max(members, key=_quality_sort_key) for members in groups.values()]
+    candidates.sort(key=_quality_sort_key, reverse=True)
+
+    remaining_capacity = max(0, MUST_LIMIT - len(must_rows))
+    chosen_others = candidates[:remaining_capacity]
+
+    selected_rows = must_rows + chosen_others
+    selected_rows.sort(key=_effective_datetime)
+    selected_ids = [row["id"] for row in selected_rows]
+
+    # "הרצה מחדש" מחליפה את הבחירה הקודמת במלואה - לא מצרפת אליה.
+    db.execute(
+        "UPDATE photos SET selected_for_album = 0, selection_order = NULL WHERE project_id = ?",
+        (project_id,),
+    )
+    for order, photo_id in enumerate(selected_ids, start=1):
+        db.execute(
+            "UPDATE photos SET selected_for_album = 1, selection_order = ? WHERE id = ?",
+            (order, photo_id),
+        )
+    db.commit()
+    _set_job_status(db, project_id, "selection", "done")
+
+    return SelectionResult(status="ok", selected_photo_ids=selected_ids, message=None)
