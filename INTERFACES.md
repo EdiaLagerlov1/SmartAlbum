@@ -642,6 +642,98 @@ def snapshot_structure(project_id: str, db: sqlite3.Connection) -> str:
     """
 ```
 
+> **עדכון (export-agent, issue #10 / F09)**: `export_album`/`ExportResult`
+> מומשו בפועל ב-`export_agent/api.py` (**אותו קובץ** שבו `snapshot_structure`
+> כבר נמצא מ-F08 - לא נוצר קובץ שני, לפי ההערה המפורשת שסוכן F08 השאיר
+> ב-`export_agent/api.py` לכל מי שיממש את F09). חתימות זהות למה שתועד מעלה
+> בסעיף 4.4 - אין שינוי. נוסף endpoint ב-`main.py` שהוא **עטיפת HTTP דקה
+> 1:1** מעל `export_album` (לפי הכלל בסעיף 1):
+>
+> - `POST /api/projects/<project_id>/export` - מריץ `export_album`. מחזיר
+>   `{"project_id", "status", "pdf_path", "structure_path", "message"}`.
+>   **200 בכל המקרים** (גם `status="error"`, כולל המקרה שבו WeasyPrint לא
+>   מותקן בסביבה) - אותה קונבנציה כמו `/run-selection`/`/generate-layout`.
+>   404 רק אם הפרויקט לא קיים כלל.
+> - `GET /api/projects/<project_id>/export/download` - נוחות ל-UI, **לא**
+>   חלק מהחוזה הפורמלי בין המודולים: מגיש את `album.pdf` (אם קיים) דרך
+>   `send_from_directory`, אותו דפוס בדיוק כמו `GET .../thumbnail` (F01).
+>   404 אם הפרויקט לא קיים, או אם `export_album` עדיין לא רץ בהצלחה
+>   (`album.pdf` לא קיים בדיסק) - **לא** מרנדר/יוצר PDF מהבקשה הזו עצמה.
+>
+> **זרימת `export_album` (ראה docstring מפורט ב-`export_agent/api.py`)**:
+> 1. פרויקט לא קיים -> `status="error"` מיידי, **לא** נוגע ב-`processing_jobs`
+>    כלל (FK לא מאפשר `project_id` לא קיים בטבלה - אין "שלב שנכשל" לכתוב).
+> 2. `processing_jobs` שלב `'export'` -> `running`.
+> 3. אין עדיין `spreads` לפרויקט (layout לא נוצר) -> `status="error"`,
+>    `error_reason="layout_not_generated"`, **לא נכתב שום קובץ** (all-or-
+>    nothing, עקבי עם `run_selection`/`generate_layout`).
+> 4. **ולידציית-שפיות חדשה שהוחלט להוסיף כאן** (לא הייתה ב-F06/F07/F08,
+>    אבל נגזרת במפורש מהאפיון של export-agent: "אל תייצא PDF אם יש תמונות
+>    `must` שלא נכללו, או אם סך התמונות חורג מ-60 - זה סימן שסטטוס הבחירה
+>    לא תקין"): `_validate_export_readiness` בודקת (א) סך תמונות (distinct)
+>    המשובצות בכל הכפולות > 60 (`MAX_EXPORT_PHOTOS`, תואם במפורש
+>    `layout_engine.MAX_SELECTED_FOR_LAYOUT` - לא ערך כפול עצמאי) ו-(ב)
+>    תמונת `flag='must'` שאינה כלולה באף כפולה (למשל נמחקה מסלוט ע"י
+>    `replace_photo_in_slot`/`change_template` של F08 בלי שהוחלפה) ->
+>    `status="error"` עם `error_reason` ספציפי (`"too_many_photos_in_album"`/
+>    `"must_photos_missing_from_album"`), **לא נכתב שום קובץ**. זו אכיפה
+>    *נוספת* ב-export-agent עצמו - לא רק הנחה ששלבים קודמים תמיד תקינים.
+> 5. WeasyPrint לא מותקן בסביבה (`import weasyprint` נכשל - ראה הערת-
+>    סביבה למטה) -> `status="error"`, `error_reason="weasyprint_unavailable"`,
+>    הודעה **נפרדת ומפורשת** מ-(3)/(4) (מגבלת-סביבה, לא בעיית-נתונים) -
+>    "לא ניתן לייצא PDF כרגע... זו מגבלת-סביבה (לא בעיה בנתוני האלבום)".
+> 6. רינדור ה-PDF נכשל (כל exception אחר מ-WeasyPrint עצמו, נתפס ב-
+>    `export_album` ולא מגיע כ-traceback ל-endpoint) -> `status="error"`,
+>    `error_reason="pdf_render_error"`.
+> 7. הצלחה: `album.pdf` (ב-`storage.export_pdf_path`) + `album_structure.json`
+>    (ב-`storage.export_structure_path`, אותו פורמט-מפתחות כמו
+>    `album_structure_prev.json` של `snapshot_structure` - `id`/`position`/
+>    `template_id`/`version`/`updated_at`/`photos[{slot_index,photo_id,
+>    is_dominant,original_filename}]` - כדי שיהיה "כל המידע הדרוש לשחזור
+>    מלא", כנדרש באפיון F09), `processing_jobs` -> `done`,
+>    `ExportResult(status="ok", pdf_path=..., structure_path=..., message=None)`.
+>
+> **"PDF זהה ל-preview" - איך זה מובטח בפועל (לא רק מוצהר)**: `export_album`
+> קוראת DB באותה שאילתה/צורת-נתונים בדיוק כמו `GET /api/projects/<id>/spreads`
+> ב-`main.py` (`_fetch_spreads_with_photos` ב-`export_agent/api.py` - אותו
+> `ORDER BY position`/`ORDER BY slot_index`, אותו JOIN ל-`photos`), ובונה
+> HTML/CSS (`_build_album_html`) שמשכפל **את מודל-התצוגה בפועל** של
+> `static/app.js`/`static/style.css` (F08): כל כפולה כשורת תיבות-סלוט
+> (flex-wrap) ממוינות לפי `slot_index`, תיבה בגודל קבוע (160px, תמונה 90px,
+> `object-fit: cover`), תווית מיוחדת לסלוט הדומיננטי. **הערה חשובה**: זה
+> *לא* הגיאומטריה המתוכננת-מראש (`x/y/w/h` ב-`templates.json`, תועד
+> בסעיף 4.3) - נבדק בפועל (`static/app.js`/`style.css`) שה-preview ב-UI
+> **אינו מיישם** פריסה אבסולוטית לפי אותה גיאומטריה, אלא שורת-תיבות פשוטה.
+> שכפול הגיאומטריה "המתוכננת" (ולא זו שבאמת מוצגת) היה *שובר* את הדרישה
+> הקריטית "PDF זהה ל-preview", אז הוחלט במפורש לשכפל את מה שבאמת על המסך.
+> **אם/כש-F08 ה-UI ישתנה ליישם בפועל את גיאומטריית ה-slots** (למשל גרסה
+> עתידית), `_build_album_html` יצטרך עדכון מתואם - מתועד כ-TODO פתוח, לא
+> "פער שקט". תמונות מוצגות דרך `thumb_path` (קובץ ה-thumbnail בדיסק, אותו
+> קובץ מדויק שה-preview מציג דרך `GET .../photos/<id>/thumbnail`) - **לא**
+> `original_path` - כדי שה-"crop"/האספקט המדויק שמוצג יהיה *אותו קובץ*
+> שהדפדפן מציג, לא קובץ אחר שעלול (תיאורטית) להציג קרופ שונה תחת
+> `object-fit: cover` עם מידות-קופסה קבועות.
+>
+> **הערת-סביבה קריטית (WeasyPrint לא מותקן, PyPI חסום - ראה INTERFACES.md
+> סעיף 1, אותה מגבלה בדיוק כמו `imagehash` ב-F04)**: בניגוד ל-F04, **אין
+> כאן מימוש-fallback** עם ספרייה אחרת - WeasyPrint הוא הבחירה המחייבת
+> בחוזה (סעיף 1) ולא הוחלפה. ה-`import weasyprint` מוגן
+> (`try/except ImportError -> weasyprint = None`) כך שכל שאר המודול
+> (ולידציה, בניית HTML/CSS, JSON, ה-endpoint ב-`main.py`) נטען/נבדק *בלי*
+> WeasyPrint מותקן בפועל. קריאת ה-render האמיתית מבודדת בפונקציה פרטית
+> אחת, `_render_pdf_bytes(html, css) -> bytes` - הנקודה היחידה שבאמת קוראת
+> ל-`weasyprint.HTML(...).write_pdf(...)`. **לא נבדק בפועל בסביבה הזו**
+> שה-PDF-bytes שמיוצרים נראים/נפתחים נכון - שני טסטים בלבד
+> (`tests/test_export_agent.py::test_export_album_writes_real_pdf_bytes`/
+> `test_render_pdf_bytes_directly`) מכוסים ב-
+> `@pytest.mark.skipif(weasyprint is None, reason="weasyprint not installed;
+> PyPI unreachable in this sandbox")` ומדלגים כאן בפועל - **כל שאר הלוגיקה
+> (ולידציה, בניית HTML/CSS, מבנה JSON, נתיבים, `processing_jobs`, ה-endpoint)
+> נבדקה בפועל בלי להזדקק ל-WeasyPrint** (169 טסטים עוברים, 2 מדולגים - ראה
+> PR #10). **TODO לכל מי שמריץ בסביבה עם גישת-רשת**: להתקין
+> `pip install weasyprint` ולהריץ את שני הטסטים המדולגים כדי לאמת בפועל
+> את ה-PDF-bytes - לא נעשה כאן, מתועד כפער-ידוע, לא "אימות מלא" כוזב.
+
 ---
 
 ## 5. חוזה F10 - סטטוס עיבוד/כשל, ניסיון חוזר, מחיקת פרויקט
