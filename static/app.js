@@ -39,6 +39,12 @@
     photosSection: document.getElementById("photos-section"),
     photosGrid: document.getElementById("photos-grid"),
     refreshPhotosBtn: document.getElementById("refresh-photos-btn"),
+    // F05/F06 (issue #33): תיוג שלבי אירוע + הרצת בחירה.
+    processingSection: document.getElementById("processing-section"),
+    tagStagesBtn: document.getElementById("tag-stages-btn"),
+    tagStagesResult: document.getElementById("tag-stages-result"),
+    runSelectionBtn: document.getElementById("run-selection-btn"),
+    runSelectionResult: document.getElementById("run-selection-result"),
     // F10 (issue #11): מצב עיבוד / ניסיון חוזר / מחיקת פרויקט.
     statusSection: document.getElementById("status-section"),
     refreshStatusBtn: document.getElementById("refresh-status-btn"),
@@ -53,8 +59,12 @@
     deleteModalError: document.getElementById("delete-modal-error"),
     deleteConfirmBtn: document.getElementById("delete-confirm-btn"),
     deleteCancelBtn: document.getElementById("delete-cancel-btn"),
-    // F08 (issue #9): כפולות האלבום.
+    // F07/F08 (issue #9, #33): כפולות האלבום.
     spreadsSection: document.getElementById("spreads-section"),
+    spreadsActionsInitial: document.getElementById("spreads-actions-initial"),
+    spreadsActionsExisting: document.getElementById("spreads-actions-existing"),
+    generateLayoutBtn: document.getElementById("generate-layout-btn"),
+    generateLayoutResult: document.getElementById("generate-layout-result"),
     refreshSpreadsBtn: document.getElementById("refresh-spreads-btn"),
     regenerateLayoutBtn: document.getElementById("regenerate-layout-btn"),
     showPrevSnapshotBtn: document.getElementById("show-prev-snapshot-btn"),
@@ -108,6 +118,7 @@
       el.projectInfo.hidden = false;
       el.uploadSection.hidden = false;
       el.photosSection.hidden = false;
+      el.processingSection.hidden = false;
       el.spreadsSection.hidden = false;
       el.statusSection.hidden = false;
       await loadPhotos();
@@ -323,6 +334,83 @@
   }
 
   // --------------------------------------------------------------------
+  // F05 (issue #33): תיוג שלבי אירוע (POST /tag-stages) - עטיפת UI דקה מעל
+  // ה-endpoint, בלי לוגיקת קיבוץ/זמן כאן (זו אחריות selection-engine).
+  // --------------------------------------------------------------------
+  async function runTagStages() {
+    if (!state.projectId) return;
+    el.tagStagesBtn.disabled = true;
+    el.tagStagesResult.hidden = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/tag-stages`, { method: "POST" });
+      const body = await resp.json();
+      el.tagStagesResult.hidden = false;
+      if (!resp.ok) {
+        el.tagStagesResult.textContent = (body && body.message) || "תיוג שלבי האירוע נכשל";
+        el.tagStagesResult.style.color = "#b42318";
+        return;
+      }
+      el.tagStagesResult.style.color = "";
+      el.tagStagesResult.textContent =
+        `התיוג הסתיים - ${body.photos.length} תמונות, ` +
+        `${body.needs_review_count} מהן מסומנות לבדיקה ידנית (ביטחון נמוך/אין חותמת זמן).`;
+      await loadStatus();
+    } catch (err) {
+      el.tagStagesResult.hidden = false;
+      el.tagStagesResult.style.color = "#b42318";
+      el.tagStagesResult.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.tagStagesBtn.disabled = false;
+    }
+  }
+
+  // --------------------------------------------------------------------
+  // F06 (issue #33): הרצת אלגוריתם הבחירה (POST /run-selection) - 200 בכל
+  // המקרים, כולל status="too_many_must"/"too_few_photos" (אלה לא שגיאות
+  // HTTP, זו תוצאה תקינה של האלגוריתם שה-UI מציג כהודעה למשתמשת - אותה
+  // קונבנציה כמו confirmRegenerateLayout/retryProcessing מעלה).
+  // --------------------------------------------------------------------
+  async function runSelection() {
+    if (!state.projectId) return;
+    el.runSelectionBtn.disabled = true;
+    el.runSelectionResult.hidden = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/run-selection`, { method: "POST" });
+      const body = await resp.json();
+      el.runSelectionResult.hidden = false;
+      if (!resp.ok) {
+        el.runSelectionResult.textContent = (body && body.message) || "הרצת הבחירה נכשלה";
+        el.runSelectionResult.style.color = "#b42318";
+        return;
+      }
+
+      if (body.status === "ok") {
+        el.runSelectionResult.style.color = "";
+        el.runSelectionResult.textContent =
+          (body.message || `נבחרו ${body.selected_count} תמונות לאלבום.`) +
+          ` ניתן ליצור כפולות למטה.`;
+      } else {
+        // status="too_many_must" / "too_few_photos" - לא נכתב כלום,
+        // המשתמשת צריכה לתקן בחירה (ראה INTERFACES.md סעיף 4.2).
+        el.runSelectionResult.style.color = "#b42318";
+        el.runSelectionResult.textContent = body.message ||
+          (body.status === "too_many_must"
+            ? "יש יותר מ-60 תמונות מסומנות כ'חובה' - יש להוריד חלק מהסימונים ולהריץ מחדש."
+            : "יש פחות מ-15 תמונות תקינות (לא מוחרגות) בפרויקט - יש להוסיף תמונות ולהריץ מחדש.");
+      }
+
+      await loadPhotos();
+      await loadStatus();
+    } catch (err) {
+      el.runSelectionResult.hidden = false;
+      el.runSelectionResult.style.color = "#b42318";
+      el.runSelectionResult.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.runSelectionBtn.disabled = false;
+    }
+  }
+
+  // --------------------------------------------------------------------
   // F10 (issue #11): מצב עיבוד per-stage, ניסיון חוזר, מחיקת פרויקט.
   // --------------------------------------------------------------------
   const STAGE_LABELS = {
@@ -476,10 +564,17 @@
     el.retryResult.hidden = true;
     el.photosFailedSummary.hidden = true;
     el.projectNameInput.value = "";
-    // F08 (issue #9): איפוס מצב הכפולות.
+    // F05/F06 (issue #33): איפוס מצב התיוג/בחירה.
+    el.processingSection.hidden = true;
+    el.tagStagesResult.hidden = true;
+    el.runSelectionResult.hidden = true;
+    // F07/F08 (issue #9, #33): איפוס מצב הכפולות.
     el.spreadsSection.hidden = true;
     el.spreadsList.innerHTML = "";
-    el.spreadsEmptyMsg.hidden = true;
+    el.spreadsEmptyMsg.hidden = false;
+    el.spreadsActionsInitial.hidden = false;
+    el.spreadsActionsExisting.hidden = true;
+    el.generateLayoutResult.hidden = true;
     el.regenerateResult.hidden = true;
     el.prevSnapshotBox.hidden = true;
     el.prevSnapshotContent.textContent = "";
@@ -642,10 +737,62 @@
     return card;
   }
 
+  // F07 (issue #33): מחליף בין בלוק "אין עדיין כפולות - כפתור יצירה ראשונית"
+  // לבלוק "יש כפולות - רענון/יצירה-מחדש/גיבוי", לפי מה שבאמת חזר מה-DB
+  // (GET /spreads) - לא state מקומי בפני עצמו, כדי שפתיחה מחדש של הפרויקט
+  // תמיד תציג את המצב הנכון.
+  function updateSpreadsActionsVisibility(hasSpreads) {
+    el.spreadsActionsInitial.hidden = hasSpreads;
+    el.spreadsActionsExisting.hidden = !hasSpreads;
+  }
+
   function renderSpreads(spreads) {
     el.spreadsList.innerHTML = "";
-    el.spreadsEmptyMsg.hidden = spreads.length !== 0;
+    updateSpreadsActionsVisibility(spreads.length !== 0);
     spreads.forEach((spread) => el.spreadsList.appendChild(renderSpreadCard(spread)));
+  }
+
+  // F07 (issue #33): יצירה ראשונית של כל 15 הכפולות (POST /generate-layout) -
+  // *לא* אותו endpoint כמו regenerate-layout (זה מניח שיש כפולות קיימות
+  // למחוק/להחליף, ראה INTERFACES.md סעיף 4.3/6). אין כאן modal אישור - אין
+  // כאן מה "להחליף" (אין כפולות קיימות עדיין), בניגוד ל-regenerate.
+  async function generateLayout() {
+    if (!state.projectId) return;
+    el.generateLayoutBtn.disabled = true;
+    el.generateLayoutResult.hidden = true;
+    try {
+      const resp = await fetch(`/api/projects/${state.projectId}/generate-layout`, {
+        method: "POST",
+      });
+      const body = await resp.json();
+      el.generateLayoutResult.hidden = false;
+      if (!resp.ok) {
+        el.generateLayoutResult.style.color = "#b42318";
+        el.generateLayoutResult.textContent = (body && body.message) || "יצירת הכפולות נכשלה";
+        return;
+      }
+
+      if (body.status === "ok") {
+        el.generateLayoutResult.style.color = "";
+        el.generateLayoutResult.textContent = `נוצרו ${body.spread_count} כפולות בהצלחה.`;
+      } else {
+        // status="error" - למשל אין תמונות נבחרות עדיין (run-selection לא
+        // רץ, או רץ וחסם עם too_many_must/too_few_photos) - אותה קונבנציה
+        // כמו run-selection/regenerate-layout מעלה, לא שגיאת HTTP.
+        el.generateLayoutResult.style.color = "#b42318";
+        el.generateLayoutResult.textContent = body.message ||
+          "לא ניתן ליצור כפולות - יש להריץ קודם בהצלחה את 'הרצת בחירת תמונות' מעלה.";
+      }
+
+      await loadSpreads();
+      await loadStatus();
+    } catch (err) {
+      el.generateLayoutResult.hidden = false;
+      el.generateLayoutResult.style.color = "#b42318";
+      el.generateLayoutResult.textContent = "שגיאת תקשורת עם השרת: " + err.message;
+    } finally {
+      el.generateLayoutBtn.disabled = false;
+    }
   }
 
   async function loadSpreads() {
@@ -788,7 +935,12 @@
     if (e.target === el.deleteModalOverlay) closeDeleteModal();
   });
 
-  // F08 (issue #9): כפולות האלבום.
+  // F05/F06 (issue #33): תיוג שלבי אירוע + הרצת בחירה.
+  el.tagStagesBtn.addEventListener("click", runTagStages);
+  el.runSelectionBtn.addEventListener("click", runSelection);
+
+  // F07/F08 (issue #9, #33): כפולות האלבום.
+  el.generateLayoutBtn.addEventListener("click", generateLayout);
   el.refreshSpreadsBtn.addEventListener("click", loadSpreads);
   el.regenerateLayoutBtn.addEventListener("click", openRegenerateModal);
   el.regenerateCancelBtn.addEventListener("click", closeRegenerateModal);

@@ -59,27 +59,64 @@
       <div id="photos-grid" class="photos-grid"></div>
     </section>
 
-    <!-- F08 (issue #9): כפולות האלבום - החלפת תמונה, שינוי תבנית, יצירה מחדש -->
-    <section class="card" id="spreads-section" hidden>
-      <h2>כפולות האלבום</h2>
+    <!-- F05/F06 (issue #33): תיוג שלבי אירוע + הרצת אלגוריתם הבחירה -
+         שני שלבים שחייבים לרוץ (לפחות הבחירה) לפני "יצירת כפולות" למטה,
+         כי generate-layout שולף תמונות לפי photos.selected_for_album=1
+         (שנכתב רק ע"י run-selection). תיוג (tag-stages) אינו תנאי מחייב
+         להרצת run-selection (אין תלות אמיתית בין השניים ב-API - ראה
+         INTERFACES.md סעיף 4.2: run_selection לא קורא ל-tag_event_stages
+         ולא תלוי בפלט שלו) - מוצגים בזה אחר זה כסדר מומלץ, לא נעילה. -->
+    <section class="card" id="processing-section" hidden>
+      <h2>תיוג ובחירה</h2>
       <div class="row">
-        <button id="refresh-spreads-btn" class="btn btn-secondary">רענון כפולות</button>
-        <button id="regenerate-layout-btn" class="btn btn-primary">יצירה מחדש של כל הכפולות</button>
-        <button id="show-prev-snapshot-btn" class="btn btn-secondary">הצגת הגיבוי האחרון</button>
+        <button id="tag-stages-btn" class="btn btn-secondary">תיוג שלבי אירוע</button>
+        <button id="run-selection-btn" class="btn btn-primary">הרצת בחירת תמונות לאלבום</button>
       </div>
       <p class="muted">
-        "יצירה מחדש" מוחקת ומחליפה את כל 15 הכפולות (כולל כל ההחלפות/שינויי התבנית
-        הידניים) ובונה אותן מחדש מהתמונות שנבחרו לאלבום. גרסה קודמת של המבנה נשמרת
-        אוטומטית לגיבוי לפני המחיקה - אך השחזור ממנו הוא <strong>ידני בלבד</strong> (אין "ביטול" אוטומטי).
+        "תיוג שלבי אירוע" מסמן לכל תמונה לאיזה שלב באירוע היא משתייכת (הכנות/טקס/קבלה/מסיבה),
+        לפי זמן הצילום - שימושי להמשך, לא שלב חובה. "הרצת בחירת תמונות" היא השלב שבאמת
+        קובע אילו תמונות ייכנסו לאלבום (עד 60, כולל כל ה"חובה" ומכבד כל ה"החרגה") - חייבת
+        לרוץ לפחות פעם אחת לפני יצירת הכפולות למטה.
       </p>
+      <p id="tag-stages-result" class="muted" hidden aria-live="polite"></p>
+      <p id="run-selection-result" class="muted" hidden aria-live="polite"></p>
+    </section>
 
-      <p id="spreads-empty-msg" class="muted" hidden>לא נוצרו עדיין כפולות לפרויקט זה - יש להריץ קודם "יצירת כפולות".</p>
-      <p id="regenerate-result" class="muted" hidden aria-live="polite"></p>
+    <!-- F07/F08 (issue #9, #33): כפולות האלבום - יצירה ראשונית, החלפת תמונה,
+         שינוי תבנית, יצירה מחדש -->
+    <section class="card" id="spreads-section" hidden>
+      <h2>כפולות האלבום</h2>
 
-      <div id="prev-snapshot-box" class="snapshot-box" hidden>
-        <h3>תוכן הגיבוי האחרון (<code>album_structure_prev.json</code>)</h3>
-        <p class="muted">זהו תוכן קובץ הגיבוי לעיון בלבד - שחזור ממנו (אם נדרש) הוא פעולה ידנית, לא אוטומטית.</p>
-        <pre id="prev-snapshot-content"></pre>
+      <!-- F07 (issue #33): אין עדיין כפולות - כפתור יצירה ראשונית בלבד
+           (POST /generate-layout). מוחלף בבלוק "spreads-actions-existing"
+           ברגע שיש כפולות (ראה updateSpreadsActionsVisibility ב-app.js). -->
+      <div id="spreads-actions-initial">
+        <p id="spreads-empty-msg" class="muted">לא נוצרו עדיין כפולות לפרויקט זה - יש להריץ קודם "הרצת בחירת תמונות" (מעלה), ואז ליצור את הכפולות.</p>
+        <div class="row">
+          <button id="generate-layout-btn" class="btn btn-primary">יצירת כפולות</button>
+        </div>
+        <p id="generate-layout-result" class="muted" hidden aria-live="polite"></p>
+      </div>
+
+      <!-- F08 (issue #9): יש כפולות קיימות - רענון/יצירה-מחדש/גיבוי. -->
+      <div id="spreads-actions-existing" hidden>
+        <div class="row">
+          <button id="refresh-spreads-btn" class="btn btn-secondary">רענון כפולות</button>
+          <button id="regenerate-layout-btn" class="btn btn-primary">יצירה מחדש של כל הכפולות</button>
+          <button id="show-prev-snapshot-btn" class="btn btn-secondary">הצגת הגיבוי האחרון</button>
+        </div>
+        <p class="muted">
+          "יצירה מחדש" מוחקת ומחליפה את כל 15 הכפולות (כולל כל ההחלפות/שינויי התבנית
+          הידניים) ובונה אותן מחדש מהתמונות שנבחרו לאלבום. גרסה קודמת של המבנה נשמרת
+          אוטומטית לגיבוי לפני המחיקה - אך השחזור ממנו הוא <strong>ידני בלבד</strong> (אין "ביטול" אוטומטי).
+        </p>
+        <p id="regenerate-result" class="muted" hidden aria-live="polite"></p>
+
+        <div id="prev-snapshot-box" class="snapshot-box" hidden>
+          <h3>תוכן הגיבוי האחרון (<code>album_structure_prev.json</code>)</h3>
+          <p class="muted">זהו תוכן קובץ הגיבוי לעיון בלבד - שחזור ממנו (אם נדרש) הוא פעולה ידנית, לא אוטומטית.</p>
+          <pre id="prev-snapshot-content"></pre>
+        </div>
       </div>
 
       <div id="spreads-list" class="spreads-list" aria-live="polite"></div>
